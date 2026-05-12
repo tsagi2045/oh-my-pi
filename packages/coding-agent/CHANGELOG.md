@@ -113,12 +113,15 @@
 
 - Changed `task.isolation.enabled=true` migration to map to `task.isolation.mode = "auto"` instead of legacy `worktree` isolation
 - Updated isolation configuration UI labels and descriptions to expose new back-end names (`overlayfs`, `projfs`, etc.) and removed references to deprecated values in guidance text
+- Changed `completion.notify` (agent end) to ship a meaningful body — the last assistant message excerpted to ~80 characters, single-lined — and a "Task complete" title with the tmux window/pane (or OMP session name when not in tmux) as subtitle, instead of the previous bare `"<session>: Complete"` string. The notification is `--group`'d by session id so reruns collapse a single banner in Notification Center rather than stacking. On macOS with `alerter` or `terminal-notifier` installed, clicking the notification activates kitty, focuses the originating tab via the kitty remote-control protocol, runs `tmux select-window` + `tmux select-pane` on the originating window/pane, and briefly highlights the pane so the user can spot where they jumped to. Outside tmux the click action is omitted; the notification still fires with body text.
+- Changed `ask.notify` (input pending) to share the same shape — "Awaiting input" title, tmux/session subtitle, the first question's text excerpted to ~60 characters as body, and the same click-to-focus behavior. Previously the notification only ever said `"Waiting for input"` and was not clickable.
 
 ### Fixed
 
 - Fixed worktree delta capture to include previously untracked file state by baselining untracked patches for both snapshots
 - Fixed task isolation startup to try alternate PAL backends when the preferred one is unavailable, allowing successful fallback instead of immediate failure
 - Mapped legacy `task.isolation.mode` values `worktree`, `fuse-overlay`, and `fuse-projfs` to their new equivalents during settings migration to preserve behavior with older configs
+- Fixed `completion.notify` not firing in the foreground interactive mode. The previous guard suppressed the notification whenever `isBackgrounded === false`, so desktop notifications only fired after `/background`. Notifications now dispatch on every `agent_end` whenever `completion.notify` is `on`. See `@oh-my-pi/pi-tui` `[Unreleased]` for the underlying macOS dispatch rework (alerter / terminal-notifier path with click-to-focus).
 
 ## [14.9.8] - 2026-05-12
 

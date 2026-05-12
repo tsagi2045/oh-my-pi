@@ -16,7 +16,16 @@
  */
 
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type Component, Container, Markdown, renderInlineMarkdown, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	composeNotificationSubtitle,
+	getTmuxContext,
+	Markdown,
+	renderInlineMarkdown,
+	TERMINAL,
+	Text,
+} from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -371,6 +380,21 @@ function formatQuestionResult(result: QuestionResult): string {
 type AskParams = AskToolInput;
 
 /**
+ * Build a notification-body excerpt from an `ask` tool invocation. The first
+ * question (which is also what the dialog shows first) is collapsed to a
+ * single line and clipped to ~60 characters. Returns `undefined` when there
+ * is no question text so callers can substitute a fallback.
+ */
+export function excerptAskPrompt(params: AskParams): string | undefined {
+	const first = params.questions[0]?.question;
+	if (!first) return undefined;
+	const collapsed = first.replaceAll(/\s+/gu, " ").trim();
+	if (!collapsed) return undefined;
+	const limit = 60;
+	return collapsed.length > limit ? `${collapsed.slice(0, limit - 1).trimEnd()}…` : collapsed;
+}
+
+/**
  * Ask tool for interactive user prompting during execution.
  *
  * Allows gathering user preferences, clarifying instructions, and getting decisions
@@ -393,11 +417,30 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		return session.hasUI ? new AskTool(session) : null;
 	}
 
-	/** Send terminal notification when ask tool is waiting for input */
-	#sendAskNotification(): void {
+	/**
+	 * Send a desktop notification when the ask tool is waiting for input.
+	 *
+	 * The body excerpts the first question's text (collapsed to a single line,
+	 * 60-char clipped) so the user sees what they're being asked without
+	 * needing to switch back to the terminal first. Clicking the notification
+	 * jumps the kitty tab + tmux pane back to OMP via the bundled
+	 * `notify-click.sh` helper.
+	 */
+	#sendAskNotification(params: AskParams): void {
 		const method = this.session.settings.get("ask.notify");
 		if (method === "off") return;
-		TERMINAL.sendNotification("Waiting for input");
+		const tmux = getTmuxContext();
+		const sessionName = this.session.getSessionName?.();
+		const subtitle = composeNotificationSubtitle(tmux, sessionName);
+		const body = excerptAskPrompt(params) ?? "Waiting for user input";
+		const sessionId = this.session.getSessionId?.() ?? "default";
+		TERMINAL.sendNotification({
+			title: "Awaiting input",
+			subtitle,
+			body,
+			group: `omp-ask-${sessionId}`,
+			onClick: tmux,
+		});
 	}
 
 	async execute(
@@ -428,7 +471,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
 		// Send notification if waiting and not suppressed
-		this.#sendAskNotification();
+		this.#sendAskNotification(params);
 
 		if (params.questions.length === 0) {
 			return {

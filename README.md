@@ -619,6 +619,24 @@ return config
 
 **Windows Terminal:** Does not support the Kitty keyboard protocol. Shift+Enter cannot be distinguished from Enter. Use Ctrl+Enter for multi-line input instead. All other keybindings work correctly.
 
+### Desktop Notifications (optional, macOS)
+
+OMP fires desktop toasts on `agent_end` (`completion.notify`) and when the `ask` tool waits for input (`ask.notify`). Default: `on`.
+
+On macOS the per-app notification permission required by `kitty`, `ghostty`, `alacritty`, etc. is almost never granted, so OMP shells out to a notifier binary that ships its own `LSApplication` bundle instead. To enable:
+
+```sh
+brew install alerter           # preferred — supports click-to-focus
+# or
+brew install terminal-notifier # also supported
+```
+
+Without either binary, OMP no-ops the dispatch and emits a one-shot warning to `~/.omp/logs/omp.YYYY-MM-DD.log` so the missed notification is discoverable. Toggle off via `/settings` → Interaction → Completion / Ask Notification.
+
+**tmux + kitty**: clicking a notification jumps back to the originating tmux pane and flashes its border. This needs `set -g allow-passthrough on` in your tmux config so OSC escape sequences (and the click handler's tmux RPC) reach the parent kitty.
+
+Linux and Windows fall through to the OSC 9 / OSC 99 / Bell escape path — same behavior as previous OMP releases.
+
 ### API Keys & OAuth
 
 **Option 1: Environment variables** (common examples)

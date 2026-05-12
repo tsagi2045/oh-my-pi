@@ -1,6 +1,6 @@
 import { INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Component, Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import { type Component, composeNotificationSubtitle, getTmuxContext, Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
@@ -25,6 +25,25 @@ type AgentSessionEventHandlers = {
 	[E in AgentSessionEventKind]: (event: Extract<AgentSessionEvent, { type: E }>) => Promise<void>;
 };
 
+/**
+ * Extract a one-line excerpt from an assistant message for use as a desktop
+ * notification body. Returns the first text block, collapsed to single-line
+ * whitespace and truncated to ~80 chars (with an ellipsis when clipped).
+ * Returns `undefined` when the message has no text content (pure tool-call
+ * turns, redacted thinking, etc.) so the caller can substitute a fallback
+ * string.
+ */
+export function excerptAssistantMessage(message: AssistantMessage | undefined): string | undefined {
+	if (!message) return undefined;
+	const text = message.content.find(
+		(c): c is { type: "text"; text: string } => c.type === "text" && Boolean(c.text),
+	)?.text;
+	if (!text) return undefined;
+	const collapsed = text.replaceAll(/\s+/gu, " ").trim();
+	if (!collapsed) return undefined;
+	const limit = 80;
+	return collapsed.length > limit ? `${collapsed.slice(0, limit - 1).trimEnd()}…` : collapsed;
+}
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	#lastThinkingCount = 0;
@@ -728,12 +747,20 @@ export class EventController {
 	}
 
 	sendCompletionNotification(): void {
-		if (this.ctx.isBackgrounded === false) return;
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
-		const title = this.ctx.sessionManager.getSessionName();
-		const message = title ? `${title}: Complete` : "Complete";
-		TERMINAL.sendNotification(message);
+		const last = this.ctx.session.getLastAssistantMessage?.();
+		const tmux = getTmuxContext();
+		const sessionName = this.ctx.sessionManager.getSessionName();
+		const subtitle = composeNotificationSubtitle(tmux, sessionName);
+		const body = excerptAssistantMessage(last) ?? "Response complete";
+		TERMINAL.sendNotification({
+			title: "Task complete",
+			subtitle,
+			body,
+			group: `omp-stop-${this.ctx.sessionManager.getSessionId?.() ?? "default"}`,
+			onClick: tmux,
+		});
 	}
 
 	async handleBackgroundEvent(event: AgentSessionEvent): Promise<void> {
