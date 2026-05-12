@@ -1,5 +1,7 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils";
+import { sendDesktopNotification } from "./notify/desktop";
+import type { NotificationOpts } from "./notify/types";
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -38,19 +40,34 @@ export class TerminalInfo {
 		if (this.notifyProtocol === NotifyProtocol.Bell) {
 			return NotifyProtocol.Bell;
 		}
-		return `${this.notifyProtocol}${message}\x1b\\`;
+		const sequence = `${this.notifyProtocol}${message}\x1b\\`;
+		return wrapForMultiplexer(sequence);
 	}
 
-	sendNotification(message: string): void {
-		if (isNotificationSuppressed()) return;
-		process.stdout.write(this.formatNotification(message));
+	sendNotification(opts: NotificationOpts): void {
+		sendDesktopNotification(this, opts);
 	}
 }
 
-export function isNotificationSuppressed(): boolean {
-	const value = $env.PI_NOTIFICATIONS;
-	if (!value) return false;
-	return value === "off" || value === "0" || value === "false";
+/**
+ * Wrap an escape sequence so it survives terminal multiplexers.
+ *
+ * tmux strips DCS/OSC sequences it does not understand unless the user has
+ * `set -g allow-passthrough on` AND the sequence is delivered through tmux's
+ * DCS passthrough envelope (`\ePtmux;\e<sequence>\e\\`, with embedded ESC
+ * bytes doubled). Without the wrapper, OSC 9/99 desktop notifications get
+ * dropped at tmux and never reach the parent terminal (e.g. kitty, ghostty,
+ * iterm2). Outside tmux, the sequence is returned untouched.
+ *
+ * Note: zellij forwards OSC sequences without DCS wrapping, so we only wrap
+ * for tmux. GNU screen has its own (incompatible) DCS protocol; users on
+ * screen need to drop into the parent terminal directly.
+ */
+function wrapForMultiplexer(sequence: string): string {
+	if (!$env.TMUX) return sequence;
+	// Inside tmux DCS passthrough, every ESC must be doubled.
+	const escaped = sequence.replaceAll("\x1b", "\x1b\x1b");
+	return `\x1bPtmux;${escaped}\x1b\\`;
 }
 
 function getForcedImageProtocol(): ImageProtocol | null | undefined {

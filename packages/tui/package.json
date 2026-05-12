@@ -51,6 +51,7 @@
 	},
 	"files": [
 		"src",
+		"scripts",
 		"README.md",
 		"CHANGELOG.md"
 	],

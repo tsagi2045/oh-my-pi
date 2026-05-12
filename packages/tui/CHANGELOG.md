@@ -5,6 +5,20 @@
 
 - Increased the minimum required Bun version for the TUI package from >=1.3.7 to >=1.3.14
 
+### Breaking Changes
+
+- `TerminalInfo.sendNotification` now takes a structured `NotificationOpts` (`{ title, subtitle?, body, group?, onClick? }`) instead of a single `message: string`. The previous one-arg form is removed. Callers pass title and body separately; macOS notifiers (alerter / terminal-notifier) render them as discrete fields, and the OSC fallback collapses them into `${title}: ${body}` for terminals that only expose a single notification text field.
+
+### Added
+
+- Added `getTmuxContext()` and `composeNotificationSubtitle()` (exported from `@oh-my-pi/pi-tui`). The first is a memoized resolver returning `{ session, window, pane, windowName, paneTitle }` when running under tmux and `null` otherwise; the second composes a human-readable subtitle from those labels with an OMP-session-name fallback. Used as the `onClick` payload and subtitle for `sendNotification` so notification clicks can refocus the originating pane and the toast names the location.
+- Added bundled `scripts/notify-click.sh` and `scripts/mac-alerter.sh` helpers. The click script activates kitty, focuses the originating tab via the kitty remote-control protocol, runs `tmux select-window` + `tmux select-pane` on the originating window/pane, and briefly highlights the pane (background + border) so the user can spot where they jumped to. The alerter wrapper gives `alerter` terminal-notifier-style fire-and-forget `--execute` semantics by backgrounding its wait+click-route inside a detached subshell (alerter has no native `--execute` flag).
+
+### Fixed
+
+- Fixed `TerminalInfo.sendNotification` not delivering desktop notifications on macOS. macOS requires per-app notification permission, which terminal emulators (kitty, ghostty, alacritty, …) almost never have, so OSC 9/99 sequences were silently dropped at the OS layer. `sendNotification` now shells out to `alerter` or `terminal-notifier` when either is on `$PATH` (both register their own LSApplication and ship a "Terminal" / `>_` icon). When neither is installed the dispatch is a deliberate no-op + a single `logger.warn` line on the first miss (subsequent dispatches stay silent) so the user can spot the missing binary in `~/.omp/logs/omp.YYYY-MM-DD.log` and `brew install alerter`. Linux/Windows still go through the OSC/Bell path.
+- Fixed `TerminalInfo.formatNotification` losing OSC 9/99 desktop notifications when running inside tmux. The OSC sequence is now wrapped in tmux's DCS passthrough envelope (`\ePtmux;…\e\\` with embedded ESC bytes doubled) when `TMUX` is set, so notifications reach the parent terminal. `set -g allow-passthrough on` is still required on the tmux side for the wrapped sequence to be forwarded. Bell-only terminals are unchanged.
+
 ## [14.9.8] - 2026-05-12
 
 ### Added

@@ -24,6 +24,10 @@ export * from "./fuzzy";
 export * from "./keybindings";
 // Kitty keyboard protocol helpers
 export * from "./keys";
+// Desktop notification helpers
+export * from "./notify/desktop";
+export * from "./notify/tmux-context";
+export * from "./notify/types";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";
