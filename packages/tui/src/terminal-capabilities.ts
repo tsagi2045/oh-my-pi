@@ -26,6 +26,13 @@ export class TerminalInfo {
 		public readonly trueColor: boolean,
 		public readonly hyperlinks: boolean,
 		public readonly notifyProtocol: NotifyProtocol = NotifyProtocol.Bell,
+		/**
+		 * Set to `true` for terminals whose macOS app bundle is itself a
+		 * registered LSApplication with notification permission (ghostty,
+		 * iTerm2, wezterm). See `LegacyNotifier.nativeMacosNotifications` for
+		 * the dispatch implication.
+		 */
+		public readonly nativeMacosNotifications: boolean = false,
 	) {}
 
 	isImageLine(line: string): boolean {
@@ -121,14 +128,122 @@ const KNOWN_TERMINALS = Object.freeze({
 	// Fallback terminals
 	base: new TerminalInfo("base", null, false, false, NotifyProtocol.Bell),
 	trueColor: new TerminalInfo("trueColor", null, true, false, NotifyProtocol.Bell),
-	// Recognized terminals
-	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
-	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9),
-	wezterm: new TerminalInfo("wezterm", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9),
-	iterm2: new TerminalInfo("iterm2", ImageProtocol.Iterm2, true, true, NotifyProtocol.Osc9),
-	vscode: new TerminalInfo("vscode", null, true, true, NotifyProtocol.Bell),
-	alacritty: new TerminalInfo("alacritty", null, true, true, NotifyProtocol.Bell),
+	// Recognized terminals. The last (boolean) arg is `nativeMacosNotifications` —
+	// true ONLY for terminals whose macOS app bundle is itself a registered
+	// LSApplication and surfaces OSC 9 / OSC 99 as a `UNUserNotificationCenter`
+	// notification with the terminal's own bundle identity. ghostty/iTerm2/
+	// wezterm fit this; kitty/alacritty/vscode do not, so notifications from
+	// them on macOS still need the alerter / terminal-notifier fallback.
+	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99, false),
+	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true),
+	wezterm: new TerminalInfo("wezterm", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true),
+	iterm2: new TerminalInfo("iterm2", ImageProtocol.Iterm2, true, true, NotifyProtocol.Osc9, true),
+	vscode: new TerminalInfo("vscode", null, true, true, NotifyProtocol.Bell, false),
+	alacritty: new TerminalInfo("alacritty", null, true, true, NotifyProtocol.Bell, false),
 });
+
+/**
+ * Parse the output of `tmux show-environment -g` and identify the outer
+ * terminal that started the tmux server. Returns `null` when no known
+ * marker is present. Exported for unit testing — the side-effecting probe
+ * is `probeOuterTerminalFromTmux` below.
+ *
+ * Order matches the env-driven detection (KITTY → GHOSTTY → WEZTERM →
+ * ITERM2 → ALACRITTY) so detection is consistent regardless of which path
+ * identified the terminal.
+ */
+export function parseTmuxEnvForOuterTerminal(text: string): TerminalId | null {
+	// `show-environment -g` emits one `KEY=VALUE` per line (or `-KEY` for
+	// unset). Match marker keys at a line boundary (start-of-text or after
+	// a newline) followed by `=`, using string ops rather than a dynamic
+	// RegExp — keeps semgrep's `detect-non-literal-regexp` happy and avoids
+	// any ReDoS risk if the input ever grows weird.
+	const has = (key: string): boolean => {
+		const needle = `${key}=`;
+		return text.startsWith(needle) || text.includes(`\n${needle}`);
+	};
+	if (has("KITTY_WINDOW_ID")) return "kitty";
+	if (has("GHOSTTY_RESOURCES_DIR")) return "ghostty";
+	if (has("WEZTERM_PANE")) return "wezterm";
+	if (has("ITERM_SESSION_ID")) return "iterm2";
+	if (has("ALACRITTY_WINDOW_ID")) return "alacritty";
+	return null;
+}
+
+/**
+ * Map a tmux `client_termname` (the TERM value the attaching terminal
+ * advertised) to OMP's TerminalId vocabulary. Returns `null` when the
+ * termname doesn't identify a recognized outer terminal — this lets the
+ * caller fall through to the next probe instead of locking detection.
+ * Exported for unit testing.
+ */
+export function parseTmuxClientTermname(termname: string | undefined): TerminalId | null {
+	if (!termname) return null;
+	const lower = termname.toLowerCase();
+	// Substring matches catch `xterm-ghostty`, `tmux-ghostty`, plain
+	// `ghostty`, etc. — terminals usually pick a TERM that mentions
+	// themselves verbatim.
+	if (lower.includes("ghostty")) return "ghostty";
+	if (lower.includes("kitty")) return "kitty";
+	if (lower.includes("wezterm")) return "wezterm";
+	if (lower.includes("iterm")) return "iterm2";
+	if (lower.includes("alacritty")) return "alacritty";
+	return null;
+}
+
+/**
+ * Identify the outer terminal that's currently displaying this tmux pane.
+ *
+ * Tries two probes in order:
+ *
+ *   1. `tmux list-clients -F '#{client_termname}'` — reflects the
+ *      CURRENTLY attached terminal. This is what OSC sequences will
+ *      actually reach when emitted from inside tmux. Robust against the
+ *      "user detached from kitty and reattached from ghostty" case.
+ *   2. `tmux show-environment -g` for marker env vars — reflects the
+ *      terminal that originally started the tmux server. Falls back here
+ *      when no client is attached (rare) or when the termname is generic
+ *      (e.g. `tmux-256color`).
+ *
+ * Returns `null` when not inside tmux, when the binary isn't on `$PATH`,
+ * or when neither probe identifies a known terminal. Synchronous,
+ * ~5–15 ms (up to two tmux subprocesses), invoked at most once per process
+ * from the cached `TERMINAL_ID` IIFE.
+ */
+function probeOuterTerminalFromTmux(): TerminalId | null {
+	if (!Bun.env.TMUX) return null;
+	try {
+		const result = Bun.spawnSync(["tmux", "list-clients", "-F", "#{client_termname}"], {
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (result.exitCode === 0) {
+			// Multiple clients possible. Take the first non-empty line — for
+			// the common single-attach case this is the right answer; in
+			// multi-attach cases this is a best-effort heuristic and the OSC
+			// emit will reach all attached terminals anyway.
+			const first = new TextDecoder()
+				.decode(result.stdout)
+				.split("\n")
+				.find(line => line.trim().length > 0);
+			const id = parseTmuxClientTermname(first?.trim());
+			if (id) return id;
+		}
+	} catch {
+		// tmux missing from $PATH or sandboxed; fall through to env probe.
+	}
+	try {
+		const result = Bun.spawnSync(["tmux", "show-environment", "-g"], {
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		if (result.exitCode !== 0) return null;
+		return parseTmuxEnvForOuterTerminal(new TextDecoder().decode(result.stdout));
+	} catch {
+		// Same — tmux unavailable.
+	}
+	return null;
+}
 
 export const TERMINAL_ID: TerminalId = (() => {
 	function caseEq(a: string, b: string): boolean {
@@ -145,8 +260,23 @@ export const TERMINAL_ID: TerminalId = (() => {
 		TERM_PROGRAM,
 		TERM,
 		COLORTERM,
+		TMUX,
 	} = Bun.env;
 
+	// Inside tmux, the per-terminal env markers (`KITTY_WINDOW_ID`,
+	// `GHOSTTY_RESOURCES_DIR`, …) survive only if tmux's `update-environment`
+	// allowed them through — but even then they reflect *the terminal that
+	// originally started the tmux server*, not whichever client is currently
+	// attached. After `tmux detach` → reattach from a different terminal,
+	// those markers lie. Probe tmux's live state first; it knows which
+	// `client_termname` is actually displaying this pane.
+	if (TMUX) {
+		const outer = probeOuterTerminalFromTmux();
+		if (outer) return outer;
+	}
+
+	// Outside tmux, env markers ARE the authoritative identity — each
+	// terminal sets its own.
 	if (KITTY_WINDOW_ID) return "kitty";
 	if (GHOSTTY_RESOURCES_DIR) return "ghostty";
 	if (WEZTERM_PANE) return "wezterm";
@@ -182,6 +312,7 @@ export const TERMINAL = (() => {
 			terminal.trueColor,
 			terminal.hyperlinks,
 			terminal.notifyProtocol,
+			terminal.nativeMacosNotifications,
 		);
 	} else if (!terminal.imageProtocol) {
 		const fallbackImageProtocol = getFallbackImageProtocol(terminal.id);
@@ -192,6 +323,7 @@ export const TERMINAL = (() => {
 				terminal.trueColor,
 				terminal.hyperlinks,
 				terminal.notifyProtocol,
+				terminal.nativeMacosNotifications,
 			);
 		}
 	}
@@ -205,6 +337,7 @@ export const TERMINAL = (() => {
 			resolved.trueColor,
 			false,
 			resolved.notifyProtocol,
+			resolved.nativeMacosNotifications,
 		);
 	}
 	return resolved;

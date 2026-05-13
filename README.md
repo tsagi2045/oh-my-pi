@@ -621,26 +621,24 @@ return config
 
 ### Desktop Notifications (optional, macOS)
 
-OMP fires desktop toasts on `agent_end` (`completion.notify`) and when the `ask` tool waits for input (`ask.notify`). Default: `on`.
+OMP fires desktop toasts on `agent_end` (`completion.notify`) and when the `ask` tool waits for input (`ask.notify`). Default: `on`. Toggle off via `/settings` → Interaction → Completion / Ask Notification.
 
-On macOS the per-app notification permission required by `kitty`, `ghostty`, `alacritty`, etc. is almost never granted, so OMP shells out to a notifier binary that ships its own `LSApplication` bundle instead. To enable:
+How they're delivered depends on your terminal:
 
-```sh
-# Preferred — supports click-to-focus + Notification Center persistence.
-# MUST be the modern vjeantet build (v26.4+); the legacy `alerter` formula
-# uses single-dash flags and won't accept the long flags OMP passes.
-brew install vjeantet/tap/alerter
-# Or:
-brew install terminal-notifier
-```
+| Terminal | macOS delivery | Click-to-focus |
+|---|---|---|
+| **ghostty / iTerm2 / wezterm** | Native: OMP writes OSC 9 / OSC 99 and the terminal app's own `LSApplication` posts to `UNUserNotificationCenter`. macOS notification-style settings, Notification Center archival, and click action all attach to **the terminal app's own settings** (System Settings → Notifications → Ghostty / iTerm2 / WezTerm). | Yes — clicking the toast jumps back to the terminal window (terminal handles this; OMP doesn't shell out). |
+| **kitty / alacritty / vscode / other** | Fallback: OMP shells out to `alerter` or `terminal-notifier` because the terminal app itself isn't a notification-capable bundle. Install one of: `brew install vjeantet/tap/alerter` (preferred — must be vjeantet v26.4+; the legacy `alerter` formula uses single-dash flags) or `brew install terminal-notifier`. Without either binary, the dispatch is a no-op + one-shot warning in `~/.omp/logs/omp.YYYY-MM-DD.log`. | Yes — via `alerter` / `terminal-notifier` + bundled `notify-click.sh` which activates the terminal and runs `tmux select-pane`. |
 
-Without either binary, OMP no-ops the dispatch and emits a one-shot warning to `~/.omp/logs/omp.YYYY-MM-DD.log` so the missed notification is discoverable. Toggle off via `/settings` → Interaction → Completion / Ask Notification.
+**tmux**: OSC sequences are wrapped in tmux DCS passthrough (`\ePtmux;…\e\\`), so they reach the outer terminal when `set -g allow-passthrough on` is configured (required). OMP also probes `tmux show-environment -g` at startup to identify the outer terminal when `TERM_PROGRAM=tmux` masks it; no config needed.
 
-Toasts are dispatched as Banners: they auto-dismiss after ~10 s and macOS archives them to Notification Center for later review. If you miss one, click the macOS clock — the entry should be there with the click-to-focus action still available. NC archival requires **System Settings → Notifications → Terminal → Show in Notification Center** to be enabled (it's on by default but worth checking if your NC is empty after a missed toast).
+Linux and Windows always use the OSC / Bell path (same as before).
 
-**tmux + kitty**: clicking a notification jumps back to the originating tmux pane and flashes its border. This needs `set -g allow-passthrough on` in your tmux config so OSC escape sequences (and the click handler's tmux RPC) reach the parent kitty.
+### Notification Center archival on macOS
 
-Linux and Windows fall through to the OSC 9 / OSC 99 / Bell escape path — same behavior as previous OMP releases.
+On terminals that deliver natively (ghostty / iTerm2 / wezterm), notification style + NC archival are controlled by the per-app entry in **System Settings → Notifications**. If toasts are persistent (don't auto-dismiss) or NC is empty after a missed toast, check that entry and switch the style to "Banner".
+
+On the alerter fallback path, archival depends on **System Settings → Notifications → Terminal → Show in Notification Center** being enabled (on by default).
 
 ### API Keys & OAuth
 

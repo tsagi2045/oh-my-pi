@@ -5,20 +5,32 @@ import type { LegacyNotifier, NotificationOpts } from "./types";
 /**
  * Public entry point for desktop notifications.
  *
- * Routes to the platform-specific implementation:
+ * Dispatch priority (in order):
  *
- * - **darwin**: shells out to alerter / terminal-notifier / osascript via
- *   `notify/mac.ts`. Carries title, subtitle, body, group, and click-callback.
- * - **other**: writes an OSC 9 / OSC 99 / Bell escape sequence to stdout
- *   using the `LegacyNotifier`'s protocol-specific formatter (typically
- *   `TerminalInfo.formatNotification`). The single text field is built from
- *   `formatLegacyMessage(opts)`.
+ * 1. **Native-on-darwin terminals (`nativeMacosNotifications = true`)** —
+ *    ghostty, iTerm2, wezterm. These register their own `LSApplication` on
+ *    macOS and surface OSC 9 / OSC 99 directly through
+ *    `UNUserNotificationCenter`. Emit the OSC sequence and let the terminal
+ *    own everything (notification style, NC archival, click-to-focus).
+ * 2. **Other darwin terminals (kitty, alacritty, vscode, plain shells)** —
+ *    no notification-capable bundle, so shell out to `alerter` /
+ *    `terminal-notifier` via `notify/mac.ts`.
+ * 3. **Linux / Windows** — write the OSC 9 / OSC 99 / Bell escape sequence
+ *    to stdout using the `LegacyNotifier`'s protocol-specific formatter.
+ *
+ * Each path carries title + subtitle + body. The OSC path collapses them to
+ * a single string via `formatLegacyMessage`; the alerter path forwards the
+ * structured `NotificationOpts` so it can render discrete fields.
  *
  * Honors `PI_NOTIFICATIONS=off|0|false` as a global suppression switch.
  */
 export function sendDesktopNotification(legacy: LegacyNotifier, opts: NotificationOpts): void {
 	if (isNotificationSuppressed()) return;
 	if (process.platform === "darwin") {
+		if (legacy.nativeMacosNotifications) {
+			process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
+			return;
+		}
 		sendMacNotification(opts);
 		return;
 	}

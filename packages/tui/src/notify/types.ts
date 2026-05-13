@@ -76,4 +76,19 @@ export interface TmuxFocusAction {
  */
 export interface LegacyNotifier {
 	formatNotification(message: string): string;
+	/**
+	 * True when the host terminal app surfaces its own notifications natively
+	 * on macOS — i.e. it's a registered LSApplication with notification
+	 * permission and handles OSC 9 / OSC 99 by calling
+	 * `UNUserNotificationCenter`. Ghostty, iTerm2, and wezterm fit this
+	 * description; kitty and alacritty do not (their OSC handlers exist but
+	 * the app isn't a notification-capable bundle on macOS).
+	 *
+	 * When true on darwin, `sendDesktopNotification` emits the OSC sequence
+	 * directly so the terminal's own bundle owns the notification — meaning
+	 * macOS notification-style settings, Notification Center, and click-to-
+	 * focus all flow through that terminal app instead of through the
+	 * `alerter` / `terminal-notifier` shell-out fallback.
+	 */
+	readonly nativeMacosNotifications: boolean;
 }
