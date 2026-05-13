@@ -1,5 +1,13 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, logger, VERSION } from "@oh-my-pi/pi-utils";
+// Embedded as Bun.build assets so `bun build --compile` ships them inside
+// the standalone binary (issue raised in #1028 review). At runtime the
+// resolver below extracts them from the read-only `$bunfs` virtual FS to a
+// real path before any `Bun.spawn()` exec.
+import macAlerterWrapperAsset from "../../scripts/mac-alerter.sh" with { type: "file" };
+import notifyClickAsset from "../../scripts/notify-click.sh" with { type: "file" };
 import { shellQuoteAll } from "./shell-quote";
 import type { NotificationOpts, TmuxFocusAction } from "./types";
 
@@ -44,11 +52,55 @@ export function findMacNotifier(): string | null {
 }
 
 /**
- * Click-handler script bundled with the TUI package. Resolves to
- * `<package-root>/scripts/notify-click.sh`. Receives session/window/pane as
- * three positional arguments.
+ * Resolve a script asset to a real, executable on-disk path.
+ *
+ * In dev (running from source), the asset import resolves to the original
+ * `.sh` file inside the package — return it verbatim.
+ *
+ * In a `bun build --compile` standalone binary the asset path lives inside
+ * the read-only `$bunfs` virtual filesystem; the kernel can't `exec()` from
+ * there. Extract the bytes to a stable per-version cache directory (with
+ * `chmod +x`) on first use and return the extracted path. Subsequent calls
+ * skip the write if the file already exists.
  */
-const NOTIFY_CLICK_SCRIPT = path.join(import.meta.dir, "..", "..", "scripts", "notify-click.sh");
+let scriptCacheDir: string | undefined;
+function getScriptCacheDir(): string {
+	if (scriptCacheDir) return scriptCacheDir;
+	scriptCacheDir = path.join(os.tmpdir(), `omp-notify-${VERSION}`);
+	fs.mkdirSync(scriptCacheDir, { recursive: true });
+	return scriptCacheDir;
+}
+
+const extractedScripts = new Map<string, string>();
+export function resolveBundledScript(assetPath: string, basename: string): string {
+	if (!isCompiledBinary()) return assetPath;
+	const cached = extractedScripts.get(basename);
+	if (cached) return cached;
+	const target = path.join(getScriptCacheDir(), basename);
+	if (!fs.existsSync(target)) {
+		const buf = fs.readFileSync(assetPath);
+		fs.writeFileSync(target, buf, { mode: 0o755 });
+	} else {
+		// Make sure the executable bit is set even when the file pre-existed
+		// (e.g. an older OMP version wrote it without `mode`).
+		try {
+			fs.chmodSync(target, 0o755);
+		} catch {
+			// Best-effort; spawn will surface a clearer error if exec fails.
+		}
+	}
+	extractedScripts.set(basename, target);
+	return target;
+}
+
+/**
+ * Click-handler script bundled with the TUI package. Receives session/window/
+ * pane as three positional arguments. Resolved lazily so the extraction only
+ * happens on the first notification dispatch (and only once per process).
+ */
+function getNotifyClickScript(): string {
+	return resolveBundledScript(notifyClickAsset, "notify-click.sh");
+}
 
 /**
  * alerter wrapper — gives alerter terminal-notifier-style fire-and-forget
@@ -56,7 +108,9 @@ const NOTIFY_CLICK_SCRIPT = path.join(import.meta.dir, "..", "..", "scripts", "n
  * alerter has no `--execute` flag of its own; it returns the user's chosen
  * action on stdout and the wrapper does the click-handler dispatch.
  */
-const MAC_ALERTER_WRAPPER = path.join(import.meta.dir, "..", "..", "scripts", "mac-alerter.sh");
+function getMacAlerterWrapper(): string {
+	return resolveBundledScript(macAlerterWrapperAsset, "mac-alerter.sh");
+}
 
 /**
  * `true` when this notifier path is `alerter` (or its basename matches).
@@ -83,8 +137,8 @@ export function isAlerter(notifier: string): boolean {
 export function buildMacNotifierArgs(
 	notifier: string,
 	opts: NotificationOpts,
-	clickScript: string = NOTIFY_CLICK_SCRIPT,
-	alerterWrapper: string = MAC_ALERTER_WRAPPER,
+	clickScript: string = getNotifyClickScript(),
+	alerterWrapper: string = getMacAlerterWrapper(),
 ): string[] {
 	if (isAlerter(notifier)) {
 		// Wrapper signature:

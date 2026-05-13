@@ -36,12 +36,15 @@ ARGS=(--title "$TITLE" --message "$BODY" --sound default --timeout 30 --close-la
 
 (
 	# `--actions Open` makes alerter wait for input. Capture the chosen
-	# action; alerter prints "Open" for the action button and
-	# "@CONTENTCLICKED" when the user clicks the notification body itself.
-	# Both should trigger focus-jump.
+	# action; alerter's output convention is:
+	#   - the literal action label (here, "Open") when the action button is
+	#     clicked, OR "@ACTIONCLICKED" in some builds/configurations,
+	#   - "@CONTENTCLICKED" when the user clicks the notification body,
+	#   - "@CLOSED" / "@TIMEOUT" when the user dismisses or it times out.
+	# Treat the first three as "user wants to jump back".
 	RESULT=$("$ALERTER" "${ARGS[@]}" 2>/dev/null)
 	if [ -n "$CLICK_SCRIPT" ] && [ -x "$CLICK_SCRIPT" ] && {
-		[ "$RESULT" = "Open" ] || [ "$RESULT" = "@CONTENTCLICKED" ]
+		[ "$RESULT" = "Open" ] || [ "$RESULT" = "@ACTIONCLICKED" ] || [ "$RESULT" = "@CONTENTCLICKED" ]
 	}; then
 		"$CLICK_SCRIPT" "$SESSION" "$WIN" "$PANE"
 	fi
