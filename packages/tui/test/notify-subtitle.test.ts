@@ -61,14 +61,34 @@ describe("composeNotificationSubtitle", () => {
 		expect(composeNotificationSubtitle(tmux({ windowName: "  oh-my-pi  ", paneTitle: "" }))).toBe("oh-my-pi");
 	});
 
-	it("prefers tmux labels over the fallback when both are available", () => {
-		// `sessionManager.getSessionName()` is OMP-internal; tmux labels are
-		// what the user sees in their status line. Tmux wins for identifiability.
-		expect(composeNotificationSubtitle(tmux({ windowName: "oh-my-pi" }), "session-display-name")).toBe("oh-my-pi");
+	it("prefers the OMP fallback over a tmux paneTitle for the pane slot", () => {
+		// User's actual complaint: title-generator caches paneTitle once per
+		// process. When the LLM-driven auto-name lands later (or the user runs
+		// /name mid-session), the cached `π: kitty & tmux` paneTitle no longer
+		// matches the live `sessionManager.getSessionName()`. The composer
+		// MUST surface the live fallback so the notification shows the actual
+		// session identity. windowName keeps its slot.
+		expect(
+			composeNotificationSubtitle(tmux({ windowName: "bun", paneTitle: "π: kitty & tmux" }), "learning-omp-setting"),
+		).toBe("bun · learning-omp-setting");
+	});
+
+	it("falls back to paneTitle when no OMP session name is supplied", () => {
+		// First-turn case before auto-naming runs. The pane title is still
+		// the best identifier we have.
+		expect(composeNotificationSubtitle(tmux({ windowName: "bun", paneTitle: "kitty & tmux" }))).toBe(
+			"bun · kitty & tmux",
+		);
 	});
 
 	it("falls back to OMP session name when tmux labels are empty", () => {
 		expect(composeNotificationSubtitle(tmux({}), "session-display-name")).toBe("session-display-name");
+	});
+
+	it("collapses to a single value when fallback and windowName are identical", () => {
+		// Avoids "oh-my-pi · oh-my-pi" when the tmux window happens to be
+		// named after the same session.
+		expect(composeNotificationSubtitle(tmux({ windowName: "oh-my-pi" }), "oh-my-pi")).toBe("oh-my-pi");
 	});
 });
 

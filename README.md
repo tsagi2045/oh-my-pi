@@ -626,12 +626,17 @@ OMP fires desktop toasts on `agent_end` (`completion.notify`) and when the `ask`
 On macOS the per-app notification permission required by `kitty`, `ghostty`, `alacritty`, etc. is almost never granted, so OMP shells out to a notifier binary that ships its own `LSApplication` bundle instead. To enable:
 
 ```sh
-brew install alerter           # preferred — supports click-to-focus
-# or
-brew install terminal-notifier # also supported
+# Preferred — supports click-to-focus + Notification Center persistence.
+# MUST be the modern vjeantet build (v26.4+); the legacy `alerter` formula
+# uses single-dash flags and won't accept the long flags OMP passes.
+brew install vjeantet/tap/alerter
+# Or:
+brew install terminal-notifier
 ```
 
 Without either binary, OMP no-ops the dispatch and emits a one-shot warning to `~/.omp/logs/omp.YYYY-MM-DD.log` so the missed notification is discoverable. Toggle off via `/settings` → Interaction → Completion / Ask Notification.
+
+Toasts are dispatched as alerter Alerts (not Banners), so they stay on screen until you close them and archive to Notification Center after dismissal. If you miss one, click the macOS clock — the entry will be there with the click-to-focus action still available.
 
 **tmux + kitty**: clicking a notification jumps back to the originating tmux pane and flashes its border. This needs `set -g allow-passthrough on` in your tmux config so OSC escape sequences (and the click handler's tmux RPC) reach the parent kitty.
 

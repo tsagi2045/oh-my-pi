@@ -74,22 +74,23 @@ function resolveTmuxContext(): TmuxFocusAction | null {
  *      gracefully.
  */
 export function composeNotificationSubtitle(tmux: TmuxFocusAction | null, fallback?: string): string | undefined {
+	const fallbackTrimmed = fallback?.trim();
 	if (tmux) {
 		const w = tmux.windowName.trim();
-		// OMP sets the OSC 0 terminal title to `π: <session-or-cwd>` via
-		// title-generator.ts. tmux mirrors that into `#{pane_title}`, so the
-		// raw value usually arrives as `π: kitty & tmux` etc. The `π:` prefix
-		// is OMP self-attribution — useful in the tmux status line, but
-		// redundant inside an OMP-fired desktop notification (the toast
-		// already attributes to OMP). Strip it so the user sees only the
-		// meaningful suffix.
-		const p = stripOmpTitlePrefix(tmux.paneTitle).trim();
+		// The OMP-supplied `fallback` is the live `getSessionName()` value — it
+		// always reflects the latest auto-name or manual rename, even when the
+		// LLM-generated session title landed *after* the cached tmux
+		// `pane_title` was captured. Prefer it over the (possibly stale)
+		// `π: …` pane title; only fall back to the pane title when the OMP
+		// name is empty (e.g. on the very first turn before any naming
+		// happens). The `π:` prefix is OMP self-attribution — redundant
+		// inside an OMP-fired desktop notification, so we strip it.
+		const p = fallbackTrimmed || stripOmpTitlePrefix(tmux.paneTitle).trim();
 		if (w && p && w !== p) return `${w} · ${p}`;
 		if (w) return w;
 		if (p) return p;
 	}
-	const trimmed = fallback?.trim();
-	return trimmed ? trimmed : undefined;
+	return fallbackTrimmed ? fallbackTrimmed : undefined;
 }
 
 /**

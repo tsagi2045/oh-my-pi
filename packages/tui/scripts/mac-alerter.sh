@@ -26,13 +26,16 @@ SESSION="$7"
 WIN="$8"
 PANE="$9"
 
-# Build alerter argv. Defaults match the Claude Code hook: 30s timeout (after
-# which the notification quietly disappears), explicit close label so the
-# action button isn't the only escape hatch.
-ARGS=(--title "$TITLE" --message "$BODY" --sound default --timeout 30 --close-label "Close")
+# Build alerter argv. alerter (vjeantet) renders Alert-style (persistent in
+# Notification Center) when at least one `--actions` value is set; without
+# `--actions` it renders a Banner that macOS auto-dismisses and may drop
+# from NC. We always pass `--actions Open` so every OMP toast archives to
+# NC, and we leave `--timeout` at the alerter default (0 = no auto-remove)
+# so the user can come back to the alert hours later. `--close-label` gives
+# an explicit dismissal button next to "Open".
+ARGS=(--title "$TITLE" --message "$BODY" --sound default --close-label "Close" --actions "Open")
 [ -n "$SUBTITLE" ] && ARGS+=(--subtitle "$SUBTITLE")
 [ -n "$GROUP" ] && ARGS+=(--group "$GROUP")
-[ -n "$CLICK_SCRIPT" ] && ARGS+=(--actions "Open")
 
 (
 	# `--actions Open` makes alerter wait for input. Capture the chosen

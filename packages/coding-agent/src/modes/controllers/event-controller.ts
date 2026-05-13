@@ -49,6 +49,7 @@ export class EventController {
 	#lastThinkingCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
+	#planModeExitDetails: ExitPlanModeDetails | undefined = undefined;
 	#backgroundToolCallIds = new Set<string>();
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
@@ -171,6 +172,7 @@ export class EventController {
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
 		this.#lastIntent = undefined;
+		this.#planModeExitDetails = undefined;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -544,6 +546,11 @@ export class EventController {
 		if (event.toolName === "exit_plan_mode" && !event.isError) {
 			const details = event.result.details as ExitPlanModeDetails | undefined;
 			if (details) {
+				// Capture before handleExitPlanModeTool aborts the session — the
+				// abort triggers agent_end which calls sendCompletionNotification,
+				// and we need this flag set by then to render "Plan ready" instead
+				// of "Task complete".
+				this.#planModeExitDetails = details;
 				await this.ctx.handleExitPlanModeTool(details);
 			}
 		}
@@ -749,16 +756,36 @@ export class EventController {
 	sendCompletionNotification(): void {
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
-		const last = this.ctx.session.getLastAssistantMessage?.();
 		const tmux = getTmuxContext();
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		const subtitle = composeNotificationSubtitle(tmux, sessionName);
+		const sessionId = this.ctx.sessionManager.getSessionId?.() ?? "default";
+
+		// When the just-finished turn called exit_plan_mode the user sees the
+		// plan-review popup in OMP — not a generic "task complete" outcome. Use
+		// a distinct title/body and a separate `group` key so plan-ready toasts
+		// don't collapse with regular completion toasts (each replaces only its
+		// own kind in Notification Center).
+		const planExit = this.#planModeExitDetails;
+		if (planExit) {
+			this.#planModeExitDetails = undefined;
+			TERMINAL.sendNotification({
+				title: "Plan ready",
+				subtitle,
+				body: planExit.title,
+				group: `omp-plan-${sessionId}`,
+				onClick: tmux,
+			});
+			return;
+		}
+
+		const last = this.ctx.session.getLastAssistantMessage?.();
 		const body = excerptAssistantMessage(last) ?? "Response complete";
 		TERMINAL.sendNotification({
 			title: "Task complete",
 			subtitle,
 			body,
-			group: `omp-stop-${this.ctx.sessionManager.getSessionId?.() ?? "default"}`,
+			group: `omp-stop-${sessionId}`,
 			onClick: tmux,
 		});
 	}

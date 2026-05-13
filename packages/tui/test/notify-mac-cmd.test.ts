@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import {
 	buildMacNotifierArgs,
 	isAlerter,
@@ -79,14 +81,16 @@ describe("buildMacNotifierArgs (alerter)", () => {
 		]);
 	});
 
-	it("emits empty click_script when onClick is null/undefined so the wrapper skips --actions", () => {
+	it("emits empty click_script when onClick is null/undefined", () => {
 		const args = buildMacNotifierArgs(
 			"/opt/homebrew/bin/alerter",
 			{ title: "Done", body: "Hello", onClick: null },
 			SCRIPT,
 			WRAPPER,
 		);
-		// Position 6 is `click_script`; empty means wrapper omits --actions.
+		// Position 6 is `click_script`; empty means the wrapper's click handler
+		// no-ops (the `--actions "Open"` button is still shown so the toast
+		// renders Alert-style and persists in Notification Center).
 		expect(args[6]).toBe("");
 	});
 
@@ -103,6 +107,34 @@ describe("buildMacNotifierArgs (alerter)", () => {
 		);
 		// Bun.spawn argv passes raw bytes; no `'\''` close-escape-reopen needed.
 		expect(args[7]).toBe("it's");
+	});
+});
+
+describe("mac-alerter.sh wrapper script shape", () => {
+	// These assertions lock the alerter argv produced *inside* the wrapper script
+	// (which is what actually surfaces the notification). The TS arg-builder just
+	// hands positional values to the wrapper; the script decides how they map to
+	// alerter flags. Two invariants matter for Notification Center persistence:
+	//
+	//   1. `--actions "Open"` MUST be unconditional — without an action value,
+	//      alerter (vjeantet ≥ v26) renders Banner-style, which macOS auto-
+	//      dismisses and may drop from NC.
+	//   2. There MUST NOT be a non-zero `--timeout`. alerter calls
+	//      `removeDeliveredNotification` when the timeout expires, which deletes
+	//      the entry from NC entirely.
+	const wrapperPath = path.resolve(import.meta.dir, "..", "scripts", "mac-alerter.sh");
+	const source = readFileSync(wrapperPath, "utf8");
+
+	it('passes --actions "Open" unconditionally', () => {
+		// The base ARGS=( ... ) line on which the wrapper builds. Must contain
+		// --actions "Open".
+		const baseArgs = source.match(/^ARGS=\([^)]*\)/m)?.[0];
+		expect(baseArgs).toBeDefined();
+		expect(baseArgs).toContain(`--actions "Open"`);
+	});
+
+	it("does NOT set a positive --timeout (alerter would remove the entry from NC)", () => {
+		expect(source).not.toMatch(/--timeout\s+[1-9]/);
 	});
 });
 
