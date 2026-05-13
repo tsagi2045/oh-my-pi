@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { sendDesktopNotification } from "@oh-my-pi/pi-tui/notify/desktop";
 import * as mac from "@oh-my-pi/pi-tui/notify/mac";
-import type { LegacyNotifier, NotificationOpts } from "@oh-my-pi/pi-tui/notify/types";
+import type { LegacyNotifier, NotificationOpts, TmuxFocusAction } from "@oh-my-pi/pi-tui/notify/types";
 
 const ORIGINAL_PLATFORM = process.platform;
 
@@ -90,5 +90,72 @@ describe("sendDesktopNotification dispatch", () => {
 		sendDesktopNotification(makeLegacy(false), opts);
 		expect(stdoutSpy).not.toHaveBeenCalled();
 		expect(macSpy).not.toHaveBeenCalled();
+	});
+});
+
+function makeFocus(overrides: Partial<TmuxFocusAction> = {}): TmuxFocusAction {
+	return {
+		session: "sess",
+		window: "sess:0",
+		pane: "%17",
+		windowName: "w",
+		paneTitle: "p",
+		...overrides,
+	};
+}
+
+describe("sendDesktopNotification native-darwin pane flash", () => {
+	// On the native-OSC path, clicks are consumed by the terminal app (ghostty,
+	// iTerm2, wezterm) — OMP never sees them and can't run `notify-click.sh`
+	// at click time. Instead we flash the pane border at dispatch time via
+	// `notify-flash.sh` so the user can spot the originating pane. These
+	// tests lock that the spawn only happens when (a) we're on the native
+	// path AND (b) we have a tmux pane to flash.
+	let stdoutSpy: ReturnType<typeof spyOn>;
+	let macSpy: ReturnType<typeof spyOn>;
+	let scriptSpy: ReturnType<typeof spyOn>;
+	let spawnSpy: ReturnType<typeof spyOn>;
+
+	beforeEach(() => {
+		stdoutSpy = spyOn(process.stdout, "write").mockImplementation(() => true);
+		macSpy = spyOn(mac, "sendMacNotification").mockImplementation(() => {});
+		scriptSpy = spyOn(mac, "getNotifyFlashScript").mockImplementation(() => "/abs/notify-flash.sh");
+		spawnSpy = spyOn(Bun, "spawn").mockImplementation(() => ({ unref: () => {} }) as never);
+		setPlatform("darwin");
+	});
+
+	afterEach(() => {
+		setPlatform(ORIGINAL_PLATFORM);
+		stdoutSpy.mockRestore();
+		macSpy.mockRestore();
+		scriptSpy.mockRestore();
+		spawnSpy.mockRestore();
+		delete (Bun.env as Record<string, string | undefined>).PI_NOTIFICATIONS;
+	});
+
+	it("spawns the flash script with the originating pane when onClick is set", () => {
+		sendDesktopNotification(makeLegacy(true), { ...opts, onClick: makeFocus({ pane: "%99" }) });
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+		const argv = spawnSpy.mock.calls[0][0] as string[];
+		expect(argv).toEqual(["/abs/notify-flash.sh", "%99"]);
+	});
+
+	it("does not spawn flash when onClick is absent (no pane to attribute)", () => {
+		sendDesktopNotification(makeLegacy(true), opts);
+		expect(stdoutSpy).toHaveBeenCalledTimes(1);
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not spawn flash on the alerter fallback path (notify-click.sh already handles it)", () => {
+		sendDesktopNotification(makeLegacy(false), { ...opts, onClick: makeFocus() });
+		expect(macSpy).toHaveBeenCalledTimes(1);
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not spawn flash on non-darwin even when onClick is set", () => {
+		setPlatform("linux");
+		sendDesktopNotification(makeLegacy(true), { ...opts, onClick: makeFocus() });
+		expect(stdoutSpy).toHaveBeenCalledTimes(1);
+		expect(spawnSpy).not.toHaveBeenCalled();
 	});
 });

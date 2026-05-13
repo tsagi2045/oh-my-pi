@@ -640,6 +640,8 @@ On terminals that deliver natively (ghostty / iTerm2 / wezterm), notification st
 
 On the alerter fallback path, archival depends on **System Settings → Notifications → Terminal → Show in Notification Center** being enabled (on by default).
 
+**Already-running sessions** keep using whatever notification path they had at startup — `TERMINAL_ID` is resolved once per process. If one tmux pane shows native ghostty notifications and another still shows the alerter "Terminal" icon variant, restart OMP in the affected pane. To verify the dev-tree symlink is live before restarting, run `readlink ~/node_modules/@oh-my-pi/pi-tui` — output should point at your local checkout.
+
 ### API Keys & OAuth
 
 **Option 1: Environment variables** (common examples)

@@ -1,6 +1,6 @@
-import { $env } from "@oh-my-pi/pi-utils";
-import { sendMacNotification } from "./mac";
-import type { LegacyNotifier, NotificationOpts } from "./types";
+import { $env, logger } from "@oh-my-pi/pi-utils";
+import { getNotifyFlashScript, sendMacNotification } from "./mac";
+import type { LegacyNotifier, NotificationOpts, TmuxFocusAction } from "./types";
 
 /**
  * Public entry point for desktop notifications.
@@ -29,12 +29,49 @@ export function sendDesktopNotification(legacy: LegacyNotifier, opts: Notificati
 	if (process.platform === "darwin") {
 		if (legacy.nativeMacosNotifications) {
 			process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
+			// On the native-OSC path the terminal app owns the click; OMP
+			// never sees it. Flash the pane at dispatch time instead — see
+			// `flashOriginatingPane` below.
+			if (opts.onClick) flashOriginatingPane(opts.onClick);
 			return;
 		}
 		sendMacNotification(opts);
 		return;
 	}
 	process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
+}
+
+/**
+ * Light up the originating tmux pane border at notification dispatch time.
+ *
+ * Used on the native-darwin OSC path (ghostty / iTerm2 / wezterm) where the
+ * notification's click is consumed by the terminal app itself — OMP never
+ * gets a callback, so it can't run `notify-click.sh` at click time the way
+ * the alerter path does. The next-best signal is to flash the pane border
+ * AT DISPATCH and hold it long enough that the user can still spot the
+ * pane when they return to the terminal a few seconds later.
+ *
+ * Fire-and-forget: the helper script backgrounds its own work and returns
+ * immediately, but we also `unref()` the child so the OMP process doesn't
+ * wait on it during shutdown.
+ */
+export function flashOriginatingPane(onClick: TmuxFocusAction): void {
+	try {
+		const script = getNotifyFlashScript();
+		const child = Bun.spawn([script, onClick.pane], {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		child.unref?.();
+	} catch (err) {
+		// Flash is a visual nicety — never block dispatch on it. Log once at
+		// debug level so a misconfigured tmux/PATH surfaces somewhere
+		// inspectable, but don't surface anything to the user.
+		logger.debug("Notification pane flash failed", {
+			err: err instanceof Error ? err.message : String(err),
+		});
+	}
 }
 
 export function isNotificationSuppressed(): boolean {

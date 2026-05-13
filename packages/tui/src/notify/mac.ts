@@ -8,6 +8,7 @@ import { isCompiledBinary, logger, VERSION } from "@oh-my-pi/pi-utils";
 // real path before any `Bun.spawn()` exec.
 import macAlerterWrapperAsset from "../../scripts/mac-alerter.sh" with { type: "file" };
 import notifyClickAsset from "../../scripts/notify-click.sh" with { type: "file" };
+import notifyFlashAsset from "../../scripts/notify-flash.sh" with { type: "file" };
 import { shellQuoteAll } from "./shell-quote";
 import type { NotificationOpts, TmuxFocusAction } from "./types";
 
@@ -100,6 +101,18 @@ export function resolveBundledScript(assetPath: string, basename: string): strin
  */
 function getNotifyClickScript(): string {
 	return resolveBundledScript(notifyClickAsset, "notify-click.sh");
+}
+
+/**
+ * Pane-flash script bundled with the TUI package. Fires at notification
+ * dispatch time on the native-macOS OSC path (ghostty / iTerm2 / wezterm)
+ * where OMP cannot observe the user's click — sets the originating tmux
+ * pane border to gold and holds it for ~30 s so the user can spot the
+ * pane when they walk back to the terminal. Receives the tmux pane id as
+ * its only positional argument. Resolved lazily, cached per process.
+ */
+export function getNotifyFlashScript(): string {
+	return resolveBundledScript(notifyFlashAsset, "notify-flash.sh");
 }
 
 /**

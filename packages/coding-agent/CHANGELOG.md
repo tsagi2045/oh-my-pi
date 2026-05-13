@@ -100,6 +100,7 @@
 ### Security
 
 - Secured the GitHub cache store with strict file permissions (`0600` files) and private permissions for newly created cache directories (`0700`) to reduce local cache exposure
+- `omp update` now invokes an `omp-relink` helper script automatically after a successful install. Looks for `$OMP_RELINK`, falling back to `~/.local/bin/omp-relink`. Skipped silently when the script isn't present or isn't executable — so end users see zero change, while dev-tree contributors keep `bun link` symlinks restored without remembering to relink by hand. `bun install -g` would otherwise replace the linked tree with a fresh registry directory on every update.
 
 ## [14.9.9] - 2026-05-12
 
