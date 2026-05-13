@@ -26,14 +26,21 @@ SESSION="$7"
 WIN="$8"
 PANE="$9"
 
-# Build alerter argv. alerter (vjeantet) renders Alert-style (persistent in
-# Notification Center) when at least one `--actions` value is set; without
-# `--actions` it renders a Banner that macOS auto-dismisses and may drop
-# from NC. We always pass `--actions Open` so every OMP toast archives to
-# NC, and we leave `--timeout` at the alerter default (0 = no auto-remove)
-# so the user can come back to the alert hours later. `--close-label` gives
-# an explicit dismissal button next to "Open".
-ARGS=(--title "$TITLE" --message "$BODY" --sound default --close-label "Close" --actions "Open")
+# Build alerter argv. The shape here decides the on-screen presentation:
+#
+#   --actions <label>   → Alert-style: persistent on screen until the user
+#                         clicks something. Reliable NC entry after dismissal.
+#   (no --actions)      → Banner-style: macOS auto-dismisses after ~5–10 s.
+#                         macOS archives the entry to Notification Center
+#                         iff "Show in Notification Center" is enabled for
+#                         this app under System Settings → Notifications.
+#
+# OMP defaults to Banner: the user asked for "auto-dismiss after ~10 s and
+# accumulate in NC". `--timeout` is left at the alerter default (0) so
+# alerter never calls `removeDeliveredNotification` — that call would also
+# purge the NC entry, defeating the point. Body clicks are still captured
+# via `@CONTENTCLICKED` even without an `--actions` button.
+ARGS=(--title "$TITLE" --message "$BODY" --sound default)
 [ -n "$SUBTITLE" ] && ARGS+=(--subtitle "$SUBTITLE")
 [ -n "$GROUP" ] && ARGS+=(--group "$GROUP")
 

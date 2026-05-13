@@ -636,7 +636,7 @@ brew install terminal-notifier
 
 Without either binary, OMP no-ops the dispatch and emits a one-shot warning to `~/.omp/logs/omp.YYYY-MM-DD.log` so the missed notification is discoverable. Toggle off via `/settings` → Interaction → Completion / Ask Notification.
 
-Toasts are dispatched as alerter Alerts (not Banners), so they stay on screen until you close them and archive to Notification Center after dismissal. If you miss one, click the macOS clock — the entry will be there with the click-to-focus action still available.
+Toasts are dispatched as Banners: they auto-dismiss after ~10 s and macOS archives them to Notification Center for later review. If you miss one, click the macOS clock — the entry should be there with the click-to-focus action still available. NC archival requires **System Settings → Notifications → Terminal → Show in Notification Center** to be enabled (it's on by default but worth checking if your NC is empty after a missed toast).
 
 **tmux + kitty**: clicking a notification jumps back to the originating tmux pane and flashes its border. This needs `set -g allow-passthrough on` in your tmux config so OSC escape sequences (and the click handler's tmux RPC) reach the parent kitty.
 

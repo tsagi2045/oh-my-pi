@@ -114,27 +114,32 @@ describe("mac-alerter.sh wrapper script shape", () => {
 	// These assertions lock the alerter argv produced *inside* the wrapper script
 	// (which is what actually surfaces the notification). The TS arg-builder just
 	// hands positional values to the wrapper; the script decides how they map to
-	// alerter flags. Two invariants matter for Notification Center persistence:
+	// alerter flags. Two invariants matter:
 	//
-	//   1. `--actions "Open"` MUST be unconditional — without an action value,
-	//      alerter (vjeantet ≥ v26) renders Banner-style, which macOS auto-
-	//      dismisses and may drop from NC.
-	//   2. There MUST NOT be a non-zero `--timeout`. alerter calls
-	//      `removeDeliveredNotification` when the timeout expires, which deletes
-	//      the entry from NC entirely.
+	//   1. NO `--actions` on the base ARGS. With `--actions`, alerter forces
+	//      Alert-style (persistent on screen, has to be clicked away). OMP's
+	//      desired UX is Banner-style: auto-dismiss after ~10 s and let macOS
+	//      archive the entry to Notification Center.
+	//   2. NO non-zero `--timeout`. alerter calls `removeDeliveredNotification`
+	//      when the timeout expires, which purges the NC entry too.
 	const wrapperPath = path.resolve(import.meta.dir, "..", "scripts", "mac-alerter.sh");
 	const source = readFileSync(wrapperPath, "utf8");
+	const baseArgs = source.match(/^ARGS=\([^)]*\)/m)?.[0];
 
-	it('passes --actions "Open" unconditionally', () => {
-		// The base ARGS=( ... ) line on which the wrapper builds. Must contain
-		// --actions "Open".
-		const baseArgs = source.match(/^ARGS=\([^)]*\)/m)?.[0];
+	it("does NOT pass --actions on the base ARGS (Banner mode lets macOS auto-dismiss)", () => {
 		expect(baseArgs).toBeDefined();
-		expect(baseArgs).toContain(`--actions "Open"`);
+		expect(baseArgs).not.toContain("--actions");
 	});
 
 	it("does NOT set a positive --timeout (alerter would remove the entry from NC)", () => {
 		expect(source).not.toMatch(/--timeout\s+[1-9]/);
+	});
+
+	it("still routes @CONTENTCLICKED through the click handler", () => {
+		// Banner mode loses the dedicated `--actions` button, but body clicks
+		// still produce `@CONTENTCLICKED` on stdout. The click-jump must still
+		// work when the user clicks the toast itself.
+		expect(source).toContain("@CONTENTCLICKED");
 	});
 });
 
