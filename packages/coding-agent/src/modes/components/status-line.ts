@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatCount, getProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -7,7 +6,7 @@ import { settings } from "../../config/settings";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
-import { calculatePromptTokens } from "../../session/compaction/compaction";
+import { computeContextBreakdown } from "../utils/context-usage";
 import * as git from "../../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../utils/session-color";
 import { sanitizeStatusText } from "../shared";
@@ -80,6 +79,9 @@ export class StatusLineComponent implements Component {
 	} | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
+	// Context breakdown caching (2s TTL — aligns with /context command output)
+	#cachedBreakdown: { usedTokens: number; contextWindow: number } | null = null;
+	#breakdownFetchedAt = 0;
 
 	constructor(private readonly session: AgentSession) {
 		this.#settings = {
@@ -377,6 +379,19 @@ export class StatusLineComponent implements Component {
 		return { fiveHour, sevenDay };
 	}
 
+	#getCachedContextBreakdown(): { usedTokens: number; contextWindow: number } {
+		const now = Date.now();
+		if (!this.#cachedBreakdown || now - this.#breakdownFetchedAt > 2_000) {
+			const breakdown = computeContextBreakdown(this.session);
+			this.#cachedBreakdown = {
+				usedTokens: breakdown.usedTokens,
+				contextWindow: breakdown.contextWindow,
+			};
+			this.#breakdownFetchedAt = now;
+		}
+		return this.#cachedBreakdown;
+	}
+
 	#buildSegmentContext(width: number): SegmentContext {
 		const state = this.session.state;
 
@@ -397,14 +412,10 @@ export class StatusLineComponent implements Component {
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
 
-		// Get context percentage
-		const lastAssistantMessage = state.messages
-			.slice()
-			.reverse()
-			.find(m => m.role === "assistant" && m.stopReason !== "aborted") as AssistantMessage | undefined;
-
-		const contextTokens = lastAssistantMessage ? calculatePromptTokens(lastAssistantMessage.usage) : 0;
-		const contextWindow = state.model?.contextWindow || 0;
+		// Context usage — aligned with /context command so both surfaces report the same value
+		const breakdown = this.#getCachedContextBreakdown();
+		const contextTokens = breakdown.usedTokens;
+		const contextWindow = breakdown.contextWindow || state.model?.contextWindow || 0;
 		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
 
 		return {
