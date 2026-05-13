@@ -6,23 +6,27 @@
 # wezterm emits OSC 9 to stdout and the terminal app handles the click
 # entirely in-app, so the click never reaches an OMP-controlled script
 # the way it does on the alerter path. To compensate, this helper lights
-# up the originating tmux pane border immediately when the notification
-# is fired, and HOLDS the golden border long enough that the user can
-# still spot the pane after walking back to the terminal.
+# up the originating tmux pane border so the user can still spot the
+# pane after returning to the terminal.
 #
 # Usage: notify-flash.sh <pane>
 #
 # Tunables (env):
 #   OMP_TMUX_BIN              — tmux binary (default /opt/homebrew/bin/tmux)
 #   OMP_FLASH_HOLD_SECONDS    — how long the golden border stays lit
-#                                (default 30s). Set to 0 to disable.
+#                                (default 8s). Set to 0 to disable.
 #
-# Differences from notify-click.sh:
-#   - Does NOT call kitty / osascript / select-pane (don't yank focus
-#     before the user clicks — they may be reading something else).
-#   - Holds the border much longer (~30s vs ~1s) since the visual cue
-#     must remain visible after the user takes their attention back.
-#   - Skips tmux/ghostty/iterm window activation entirely.
+# Visual design (revised after user feedback that the earlier
+# `select-pane -P bg=…` blink pulses inside the pane were jarring during
+# normal code editing — too many notifications fire in a streaming
+# session, and a 0.6 s background flip × N stacks up to a distracting
+# flicker):
+#   - **Static border-color change only.** Border flips to gold once,
+#     stays gold for HOLD_SECONDS, then resets. No background flips,
+#     no animation, no select-pane.
+#   - **Short hold (8s default).** Long enough to catch the eye when the
+#     user comes back from clicking the toast, short enough that it
+#     doesn't bleed across consecutive notifications.
 #
 # Fire-and-forget: backgrounds + disowns the worker subshell so the
 # caller (OMP's notification dispatch) returns immediately.
@@ -39,23 +43,16 @@ if [ -z "$TMUX_BIN" ] || [ -z "$PANE" ]; then
 	exit 0
 fi
 
-HOLD_SECONDS="${OMP_FLASH_HOLD_SECONDS:-30}"
+HOLD_SECONDS="${OMP_FLASH_HOLD_SECONDS:-8}"
+
+# Bail before spawning anything if the caller disabled the hold entirely.
+if [ "$HOLD_SECONDS" -le 0 ] 2>/dev/null; then
+	exit 0
+fi
 
 (
 	"$TMUX_BIN" set-option -p -t "$PANE" pane-active-border-style "fg=#f9e2af,bold" 2>/dev/null
-	# Two quick 150 ms background blinks pull the eye to the pane at the
-	# same time the macOS toast appears in the corner.
-	for _ in 1 2; do
-		"$TMUX_BIN" select-pane -t "$PANE" -P 'bg=#45475a' 2>/dev/null
-		sleep 0.15
-		"$TMUX_BIN" select-pane -t "$PANE" -P 'default' 2>/dev/null
-		sleep 0.15
-	done
-	# Hold the golden border so the user still sees it after returning to
-	# the terminal. `sleep 0` is a no-op for users who want to opt out.
-	if [ "$HOLD_SECONDS" -gt 0 ] 2>/dev/null; then
-		sleep "$HOLD_SECONDS"
-	fi
+	sleep "$HOLD_SECONDS"
 	"$TMUX_BIN" set-option -p -t "$PANE" -u pane-active-border-style 2>/dev/null
 ) </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || :
