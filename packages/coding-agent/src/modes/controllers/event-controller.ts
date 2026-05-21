@@ -1,6 +1,6 @@
 import { INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Component, composeNotificationSubtitle, getTmuxContext, Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
+import { type Component, composeNotificationSubtitle, getNotificationFocusContext, Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
@@ -26,9 +26,16 @@ type AgentSessionEventHandlers = {
 };
 
 /**
- * Extract a one-line excerpt from an assistant message for use as a desktop
+ * Extract an excerpt from an assistant message for use as a desktop
  * notification body. Returns the first text block, collapsed to single-line
- * whitespace and truncated to ~80 chars (with an ellipsis when clipped).
+ * whitespace and truncated to 200 chars (with an ellipsis when clipped).
+ *
+ * The 200-char cap is deliberately generous — both alerter and the macOS
+ * Notification Center wrap longer bodies onto multiple lines gracefully,
+ * and the user explicitly asked for "내용 그대로". Anything above ~200
+ * starts getting truncated by macOS itself; matching its limit avoids
+ * double-truncation while keeping toasts a sensible visual size.
+ *
  * Returns `undefined` when the message has no text content (pure tool-call
  * turns, redacted thinking, etc.) so the caller can substitute a fallback
  * string.
@@ -41,7 +48,7 @@ export function excerptAssistantMessage(message: AssistantMessage | undefined): 
 	if (!text) return undefined;
 	const collapsed = text.replaceAll(/\s+/gu, " ").trim();
 	if (!collapsed) return undefined;
-	const limit = 80;
+	const limit = 200;
 	return collapsed.length > limit ? `${collapsed.slice(0, limit - 1).trimEnd()}…` : collapsed;
 }
 export class EventController {
@@ -49,7 +56,7 @@ export class EventController {
 	#lastThinkingCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
-	#planModeExitDetails: ExitPlanModeDetails | undefined = undefined;
+	#suppressNextCompletionNotification = false;
 	#backgroundToolCallIds = new Set<string>();
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
@@ -172,7 +179,7 @@ export class EventController {
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
 		this.#lastIntent = undefined;
-		this.#planModeExitDetails = undefined;
+		this.#suppressNextCompletionNotification = false;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -546,11 +553,12 @@ export class EventController {
 		if (event.toolName === "exit_plan_mode" && !event.isError) {
 			const details = event.result.details as ExitPlanModeDetails | undefined;
 			if (details) {
-				// Capture before handleExitPlanModeTool aborts the session — the
-				// abort triggers agent_end which calls sendCompletionNotification,
-				// and we need this flag set by then to render "Plan ready" instead
-				// of "Task complete".
-				this.#planModeExitDetails = details;
+				// The actual `Plan ready` desktop notification is fired by the
+				// interactive-mode handler once the plan preview and approval
+				// selector are on screen, NOT here — firing on agent_end (which
+				// is triggered by the abort below) would deliver the toast
+				// before the UI is ready, so clicking it would land the user on
+				// a half-rendered pane.
 				await this.ctx.handleExitPlanModeTool(details);
 			}
 		}
@@ -756,28 +764,30 @@ export class EventController {
 	sendCompletionNotification(): void {
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
-		const tmux = getTmuxContext();
-		const sessionName = this.ctx.sessionManager.getSessionName();
-		const subtitle = composeNotificationSubtitle(tmux, sessionName);
-		const sessionId = this.ctx.sessionManager.getSessionId?.() ?? "default";
 
-		// When the just-finished turn called exit_plan_mode the user sees the
-		// plan-review popup in OMP — not a generic "task complete" outcome. Use
-		// a distinct title/body and a separate `group` key so plan-ready toasts
-		// don't collapse with regular completion toasts (each replaces only its
-		// own kind in Notification Center).
-		const planExit = this.#planModeExitDetails;
-		if (planExit) {
-			this.#planModeExitDetails = undefined;
-			TERMINAL.sendNotification({
-				title: "Plan ready",
-				subtitle,
-				body: planExit.title,
-				group: `omp-plan-${sessionId}`,
-				onClick: tmux,
-			});
+		// One-shot dedupe: when the plan-ready toast already fired this turn,
+		// a stray follow-up agent_end (e.g. emitted by the plan-mode abort
+		// itself) must NOT re-notify. The flag is consumed on the next call
+		// and cleared on agent_start so the next real turn notifies normally.
+		if (this.#suppressNextCompletionNotification) {
+			this.#suppressNextCompletionNotification = false;
 			return;
 		}
+
+		// During plan-mode work the agent may finish multiple intermediate
+		// turns (reads, planning text, plan-mode enforcement re-prompts)
+		// before finally calling exit_plan_mode. None of those should
+		// produce a `Task complete` toast — the user only cares about the
+		// single `Plan ready` notification fired by sendPlanReadyNotification
+		// once the approval selector is on screen.
+		if (this.ctx.planModeEnabled) {
+			return;
+		}
+
+		const focus = getNotificationFocusContext();
+		const sessionName = this.ctx.sessionManager.getSessionName();
+		const subtitle = composeNotificationSubtitle(focus, sessionName);
+		const sessionId = this.ctx.sessionManager.getSessionId?.() ?? "default";
 
 		const last = this.ctx.session.getLastAssistantMessage?.();
 		const body = excerptAssistantMessage(last) ?? "Response complete";
@@ -786,8 +796,51 @@ export class EventController {
 			subtitle,
 			body,
 			group: `omp-stop-${sessionId}`,
-			onClick: tmux,
+			onClick: this.#buildOnClick(focus),
 		});
+	}
+
+	/**
+	 * Fire the dedicated `Plan ready` desktop notification.
+	 *
+	 * Called by InteractiveMode.handleExitPlanModeTool() AFTER the plan
+	 * preview is rendered and the approval selector is on screen, so a user
+	 * who clicks the toast lands on a UI that is ready to act on.
+	 *
+	 * Also arms a one-shot suppression flag on the regular completion path
+	 * so the agent_end emitted by the plan-mode abort (which fires shortly
+	 * after this method runs) does NOT produce a second `Task complete` or
+	 * `Plan ready` toast in the same turn.
+	 */
+	sendPlanReadyNotification(details: ExitPlanModeDetails): void {
+		const notify = settings.get("completion.notify");
+		if (notify === "off") return;
+
+		const focus = getNotificationFocusContext();
+		const sessionName = this.ctx.sessionManager.getSessionName();
+		const subtitle = composeNotificationSubtitle(focus, sessionName);
+		const sessionId = this.ctx.sessionManager.getSessionId?.() ?? "default";
+
+		this.#suppressNextCompletionNotification = true;
+		TERMINAL.sendNotification({
+			title: "Plan ready",
+			subtitle,
+			body: details.title,
+			group: `omp-plan-${sessionId}`,
+			onClick: this.#buildOnClick(focus),
+		});
+	}
+
+	/**
+	 * Stamp the `terminalApp` field onto a multiplexer focus context so the
+	 * click handler knows which macOS app to `tell ... to activate`. Returns
+	 * `null` when there's no context (no click-jump possible) so the caller
+	 * can pass it straight through to `sendNotification`.
+	 */
+	#buildOnClick(focus: ReturnType<typeof getNotificationFocusContext>): ReturnType<typeof getNotificationFocusContext> {
+		if (!focus) return null;
+		const macAppName = TERMINAL.macAppName;
+		return macAppName ? { ...focus, terminalApp: macAppName } : focus;
 	}
 
 	async handleBackgroundEvent(event: AgentSessionEvent): Promise<void> {

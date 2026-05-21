@@ -20,6 +20,15 @@ export type TerminalId = "kitty" | "ghostty" | "wezterm" | "iterm2" | "vscode" |
 const SIXEL_DCS_START_REGEX = /\x1bP(?:[0-9;]*)q/u;
 /** Terminal capability details used for rendering and protocol selection. */
 export class TerminalInfo {
+	/**
+	 * Forced delivery override (see `LegacyNotifier.deliveryOverride`). Mutable
+	 * so the coding-agent boot path can wire `notify.delivery` into the
+	 * singleton AFTER `Settings.init` resolves. `readonly` would force every
+	 * caller to thread a fresh TerminalInfo through, which there's no point
+	 * doing for a process-global capability flag.
+	 */
+	deliveryOverride?: "alerter" | "osc";
+
 	constructor(
 		public readonly id: TerminalId,
 		public readonly imageProtocol: ImageProtocol | null,
@@ -33,6 +42,13 @@ export class TerminalInfo {
 		 * the dispatch implication.
 		 */
 		public readonly nativeMacosNotifications: boolean = false,
+		/**
+		 * macOS Application name used by `osascript -e 'tell application
+		 * "<name>" to activate'` in the alerter click handler. `undefined`
+		 * for non-mac-app terminals (or unrecognized "base"/"trueColor"); the
+		 * click handler then skips the `activate` step.
+		 */
+		public readonly macAppName?: string,
 	) {}
 
 	isImageLine(line: string): boolean {
@@ -128,18 +144,20 @@ const KNOWN_TERMINALS = Object.freeze({
 	// Fallback terminals
 	base: new TerminalInfo("base", null, false, false, NotifyProtocol.Bell),
 	trueColor: new TerminalInfo("trueColor", null, true, false, NotifyProtocol.Bell),
-	// Recognized terminals. The last (boolean) arg is `nativeMacosNotifications` —
+	// Recognized terminals. The boolean arg is `nativeMacosNotifications` —
 	// true ONLY for terminals whose macOS app bundle is itself a registered
 	// LSApplication and surfaces OSC 9 / OSC 99 as a `UNUserNotificationCenter`
 	// notification with the terminal's own bundle identity. ghostty/iTerm2/
 	// wezterm fit this; kitty/alacritty/vscode do not, so notifications from
 	// them on macOS still need the alerter / terminal-notifier fallback.
-	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99, false),
-	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true),
-	wezterm: new TerminalInfo("wezterm", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true),
-	iterm2: new TerminalInfo("iterm2", ImageProtocol.Iterm2, true, true, NotifyProtocol.Osc9, true),
+	// The trailing string is the macOS Application name fed to `osascript ...
+	// tell application "<name>" to activate` in the alerter click handler.
+	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99, false, "kitty"),
+	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true, "Ghostty"),
+	wezterm: new TerminalInfo("wezterm", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, true, "WezTerm"),
+	iterm2: new TerminalInfo("iterm2", ImageProtocol.Iterm2, true, true, NotifyProtocol.Osc9, true, "iTerm"),
 	vscode: new TerminalInfo("vscode", null, true, true, NotifyProtocol.Bell, false),
-	alacritty: new TerminalInfo("alacritty", null, true, true, NotifyProtocol.Bell, false),
+	alacritty: new TerminalInfo("alacritty", null, true, true, NotifyProtocol.Bell, false, "Alacritty"),
 });
 
 /**
@@ -313,6 +331,7 @@ export const TERMINAL = (() => {
 			terminal.hyperlinks,
 			terminal.notifyProtocol,
 			terminal.nativeMacosNotifications,
+			terminal.macAppName,
 		);
 	} else if (!terminal.imageProtocol) {
 		const fallbackImageProtocol = getFallbackImageProtocol(terminal.id);
@@ -324,6 +343,7 @@ export const TERMINAL = (() => {
 				terminal.hyperlinks,
 				terminal.notifyProtocol,
 				terminal.nativeMacosNotifications,
+				terminal.macAppName,
 			);
 		}
 	}
@@ -338,6 +358,7 @@ export const TERMINAL = (() => {
 			false,
 			resolved.notifyProtocol,
 			resolved.nativeMacosNotifications,
+			resolved.macAppName,
 		);
 	}
 	return resolved;
@@ -345,6 +366,7 @@ export const TERMINAL = (() => {
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
+	deliveryOverride?: "alerter" | "osc";
 };
 
 /**
@@ -352,6 +374,18 @@ type MutableTerminalInfo = {
  */
 export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): void {
 	(TERMINAL as unknown as MutableTerminalInfo).imageProtocol = imageProtocol;
+}
+
+/**
+ * Override the desktop-notification delivery path on the TERMINAL singleton.
+ *
+ * Wired from the user's `notify.delivery` setting after `Settings.init`
+ * resolves. Defaults to `"auto"` (= `undefined` override, falls through to
+ * the `nativeMacosNotifications` heuristic). Pass `"auto"` to clear a
+ * previously-set override.
+ */
+export function setNotificationDelivery(value: "auto" | "alerter" | "osc"): void {
+	(TERMINAL as unknown as MutableTerminalInfo).deliveryOverride = value === "auto" ? undefined : value;
 }
 
 export function getTerminalInfo(terminalId: TerminalId): TerminalInfo {

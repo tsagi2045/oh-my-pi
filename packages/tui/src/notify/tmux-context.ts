@@ -1,4 +1,5 @@
-import type { TmuxFocusAction } from "./types";
+import { getZellijContext } from "./zellij-context";
+import type { NotificationFocusAction } from "./types";
 
 /**
  * Resolves the current tmux session/window/pane for click-jump callbacks.
@@ -11,15 +12,19 @@ import type { TmuxFocusAction } from "./types";
  * `null` means "no click callback should be attached" — the notification
  * still gets dispatched, just without `--execute`.
  */
-let cached: TmuxFocusAction | null | undefined;
+let cached: NotificationFocusAction | null | undefined;
 
-export function getTmuxContext(): TmuxFocusAction | null {
+export function getTmuxContext(): NotificationFocusAction | null {
 	if (cached !== undefined) return cached;
 	cached = resolveTmuxContext();
 	return cached;
 }
 
-function resolveTmuxContext(): TmuxFocusAction | null {
+export function getNotificationFocusContext(): NotificationFocusAction | null {
+	return getZellijContext() ?? getTmuxContext();
+}
+
+function resolveTmuxContext(): NotificationFocusAction | null {
 	const pane = process.env.TMUX_PANE;
 	const tmuxEnv = process.env.TMUX;
 	if (!pane || !tmuxEnv) return null;
@@ -30,7 +35,15 @@ function resolveTmuxContext(): TmuxFocusAction | null {
 		// these tmux variables can legitimately contain a `\n`.
 		//
 		// Five fields, fixed order:
-		//   session_name | session:window_index | pane_id | window_name | pane_title
+		//   session_name              (used as the sessionName label + as the
+		//                              `switch-client -t` target inside the
+		//                              click handler so cross-session jumps
+		//                              actually land in the right session)
+		//   session_name:window_index (`select-window` target)
+		//   pane_id                   (`select-pane` target)
+		//   window_name               (display-only label)
+		//   pane_title                (display-only label, π-prefix stripped
+		//                              before showing to the user)
 		const result = Bun.spawnSync(
 			[
 				"tmux",
@@ -47,61 +60,49 @@ function resolveTmuxContext(): TmuxFocusAction | null {
 		const parts = out.split("\n");
 		if (parts.length !== 5) return null;
 		const [session, window, paneId, windowName, paneTitle] = parts as [string, string, string, string, string];
-		// session/window/pane are required for click-jump to work; without
-		// them we return null so the caller skips the click action entirely.
-		// windowName/paneTitle are display-only — empty is acceptable.
 		if (!session || !window || !paneId) return null;
-		return { session, window, pane: paneId, windowName, paneTitle };
+		return { kind: "tmux", session, window, pane: paneId, windowName, paneTitle };
 	} catch {
-		// `tmux` not on PATH or some other spawn failure — gracefully degrade.
 		return null;
 	}
 }
 
 /**
- * Compose a human-readable subtitle string for desktop notifications from
- * the tmux context plus an optional fallback (e.g. the OMP session name set
- * via `/name`). Used by the completion + ask fire sites.
+ * Compose the desktop notification subtitle from the multiplexer context plus
+ * the **OMP session name** supplied by the caller (typically
+ * `sessionManager.getSessionName()`).
  *
- * Resolution order:
- *   1. `windowName · paneTitle` when both are set and non-equal — gives the
- *      user the most context (project + role).
- *   2. `windowName` or `paneTitle` alone when only one is non-empty.
- *   3. `fallback` (typically `sessionManager.getSessionName()`) when tmux is
- *      absent or both display labels are empty.
- *   4. `undefined` when nothing is available — the toast renders without a
- *      subtitle line, which both alerter and macOS notifications handle
- *      gracefully.
+ * Output format:
+ *
+ *   `<windowName> · <OMPSessionName>`
+ *
+ * where the second half is the OMP session name (e.g.
+ * `"Ghostty zellij 알림 설정"` — the LLM-generated or `/name`-set label the
+ * user assigns to a chat session, NOT the multiplexer session name).
+ *
+ * This is what the user actually wants to see: tab/window name (project /
+ * role) + the meaningful work label for this OMP run.
+ *
+ * Fallback chain (most specific → least specific):
+ *   1. windowName + ompSessionName both set (and distinct) → `<windowName> · <ompSessionName>`
+ *   2. windowName alone (no OMP session, e.g. before the first auto-name lands) → `<windowName>`
+ *   3. ompSessionName alone (empty windowName) → `<ompSessionName>`
+ *   4. multiplexer sessionName as a last resort → `<session>`
+ *   5. nothing → `undefined`
  */
-export function composeNotificationSubtitle(tmux: TmuxFocusAction | null, fallback?: string): string | undefined {
+export function composeNotificationSubtitle(ctx: NotificationFocusAction | null, fallback?: string): string | undefined {
 	const fallbackTrimmed = fallback?.trim();
-	if (tmux) {
-		const w = tmux.windowName.trim();
-		// The OMP-supplied `fallback` is the live `getSessionName()` value — it
-		// always reflects the latest auto-name or manual rename, even when the
-		// LLM-generated session title landed *after* the cached tmux
-		// `pane_title` was captured. Prefer it over the (possibly stale)
-		// `π: …` pane title; only fall back to the pane title when the OMP
-		// name is empty (e.g. on the very first turn before any naming
-		// happens). The `π:` prefix is OMP self-attribution — redundant
-		// inside an OMP-fired desktop notification, so we strip it.
-		const p = fallbackTrimmed || stripOmpTitlePrefix(tmux.paneTitle).trim();
-		if (w && p && w !== p) return `${w} · ${p}`;
+	const ompSession = fallbackTrimmed || undefined;
+	if (ctx) {
+		const w = ctx.windowName.trim();
+		if (w && ompSession && w !== ompSession) return `${w} · ${ompSession}`;
 		if (w) return w;
-		if (p) return p;
+		if (ompSession) return ompSession;
+		const s = ctx.session.trim();
+		if (s) return s;
+		return undefined;
 	}
-	return fallbackTrimmed ? fallbackTrimmed : undefined;
-}
-
-/**
- * Strip OMP's own `π: ` (or `π:`) prefix from a tmux pane title.
- *
- * Kept tightly scoped — only the literal `π` glyph is removed, not arbitrary
- * single-char prefixes — so a pane title that legitimately starts with a
- * different non-ASCII char + colon (set by another tool) survives intact.
- */
-function stripOmpTitlePrefix(value: string): string {
-	return value.replace(/^π\s*:\s*/u, "");
+	return ompSession;
 }
 
 /** Reset the cache. Test-only. */

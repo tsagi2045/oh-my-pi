@@ -11,7 +11,7 @@ import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, setNotificationDelivery } from "@oh-my-pi/pi-tui";
 import {
 	$env,
 	$flag,
@@ -703,6 +703,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	});
 	const settings = options.settings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
+	setNotificationDelivery(settings.get("notify.delivery"));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();

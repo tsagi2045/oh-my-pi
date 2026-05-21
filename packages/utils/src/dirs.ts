@@ -37,14 +37,19 @@ export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
  * This preserves aliases like /private/tmp -> /tmp without rewriting unrelated paths.
  */
 function standardizeMacOSPath(p: string): string {
-	if (process.platform !== "darwin" || !p.startsWith("/private/")) return p;
-	const stripped = p.slice("/private".length);
+	// macOS APFS returns paths in NFD (decomposed Unicode). Normalize to NFC so
+	// Korean and other multi-codepoint characters render as composed syllables
+	// rather than individual Hangul jamo that visually resemble CJK characters.
+	// input.ts applies the same normalization to pasted text for the same reason.
+	const nfc = p.normalize("NFC");
+	if (process.platform !== "darwin" || !nfc.startsWith("/private/")) return nfc;
+	const stripped = nfc.slice("/private".length);
 	try {
-		if (fs.realpathSync(p) === fs.realpathSync(stripped)) {
+		if (fs.realpathSync(nfc) === fs.realpathSync(stripped)) {
 			return stripped;
 		}
 	} catch {}
-	return p;
+	return nfc;
 }
 
 export function resolveEquivalentPath(inputPath: string): string {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import {
+	buildClickCommand,
 	buildMacNotifierArgs,
 	isAlerter,
 	resetMacNotifierCacheForTesting,
@@ -26,15 +27,28 @@ describe("buildMacNotifierArgs (alerter)", () => {
 		// alerter has no `--execute` flag, so OMP shells out to the wrapper
 		// `scripts/mac-alerter.sh` which handles the wait+click-route in a
 		// detached subshell. The wrapper signature is:
-		//   wrapper alerter title subtitle body group click session window pane
+		//   wrapper alerter title subtitle body group click terminal_app session window pane multiplexer
 		const args = buildMacNotifierArgs("/opt/homebrew/bin/alerter", { title: "Done", body: "Hello" }, SCRIPT, WRAPPER);
-		expect(args).toEqual([WRAPPER, "/opt/homebrew/bin/alerter", "Done", "", "Hello", "", "", "", "", ""]);
+		expect(args).toEqual([
+			WRAPPER,
+			"/opt/homebrew/bin/alerter",
+			"Done",
+			"",
+			"Hello",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"",
+			"tmux",
+		]);
 	});
 
 	it("forwards subtitle and group to the wrapper as positional args", () => {
 		const args = buildMacNotifierArgs(
 			"/opt/homebrew/bin/alerter",
-			{ title: "Task complete", subtitle: "my-session", body: "All done", group: "omp-stop-abc" },
+			{ title: "Task complete", subtitle: "main:2.1 · oh-my-pi", body: "All done", group: "omp-stop-abc" },
 			SCRIPT,
 			WRAPPER,
 		);
@@ -42,17 +56,19 @@ describe("buildMacNotifierArgs (alerter)", () => {
 			WRAPPER,
 			"/opt/homebrew/bin/alerter",
 			"Task complete",
-			"my-session",
+			"main:2.1 · oh-my-pi",
 			"All done",
 			"omp-stop-abc",
 			"",
 			"",
 			"",
 			"",
+			"",
+			"tmux",
 		]);
 	});
 
-	it("forwards click action to the wrapper as click_script + session/window/pane", () => {
+	it("forwards click action to the wrapper as click_script + terminal_app + session/window/pane", () => {
 		// The wrapper, NOT TS, builds the alerter --actions flag and routes
 		// the click to the script. So no shell quoting is needed here — the
 		// values pass through Bun.spawn's argv array intact (incl. quotes,
@@ -62,7 +78,14 @@ describe("buildMacNotifierArgs (alerter)", () => {
 			{
 				title: "Task complete",
 				body: "All done",
-				onClick: { session: "my session", window: "my session:0", pane: "%5", windowName: "", paneTitle: "" },
+				onClick: {
+					session: "my session",
+					window: "my session:0",
+					pane: "%5",
+					windowName: "",
+					paneTitle: "",
+					terminalApp: "Ghostty",
+				},
 			},
 			SCRIPT,
 			WRAPPER,
@@ -75,23 +98,74 @@ describe("buildMacNotifierArgs (alerter)", () => {
 			"All done",
 			"",
 			SCRIPT,
+			"Ghostty",
 			"my session",
 			"my session:0",
 			"%5",
+			"tmux",
 		]);
 	});
 
-	it("emits empty click_script when onClick is null/undefined", () => {
+	it("forwards zellij click action with explicit multiplexer kind", () => {
+		const args = buildMacNotifierArgs(
+			"/opt/homebrew/bin/alerter",
+			{
+				title: "Task complete",
+				body: "All done",
+				onClick: {
+					kind: "zellij",
+					session: "main",
+					window: "7",
+					pane: "5",
+					windowName: "omp",
+					paneTitle: "π: omp",
+					terminalApp: "Ghostty",
+				},
+			},
+			SCRIPT,
+			WRAPPER,
+		);
+		expect(args.slice(-5)).toEqual(["Ghostty", "main", "7", "5", "zellij"]);
+	});
+
+	it("emits empty click_script and empty terminal_app when onClick is null/undefined", () => {
 		const args = buildMacNotifierArgs(
 			"/opt/homebrew/bin/alerter",
 			{ title: "Done", body: "Hello", onClick: null },
 			SCRIPT,
 			WRAPPER,
 		);
-		// Position 6 is `click_script`; empty means the wrapper's click handler
-		// no-ops (the `--actions "Open"` button is still shown so the toast
-		// renders Alert-style and persists in Notification Center).
+		// Position 6 is `click_script`, 7 is `terminal_app`; both empty means
+		// the wrapper's click handler no-ops.
 		expect(args[6]).toBe("");
+		expect(args[7]).toBe("");
+		expect(args[11]).toBe("tmux");
+	});
+
+	it("emits empty terminal_app when onClick is set but terminalApp is missing (no app to activate)", () => {
+		// Fire site doesn't have `TERMINAL.macAppName` (e.g. base / trueColor
+		// terminal). Click still routes pane-jump; just skips the
+		// `osascript ... activate` step.
+		const args = buildMacNotifierArgs(
+			"/opt/homebrew/bin/alerter",
+			{
+				title: "x",
+				body: "y",
+				onClick: {
+					session: "s",
+					window: "s:0",
+					pane: "%1",
+					windowName: "",
+					paneTitle: "",
+				},
+			},
+			SCRIPT,
+			WRAPPER,
+		);
+		expect(args[6]).toBe(SCRIPT);
+		expect(args[7]).toBe("");
+		expect(args[8]).toBe("s");
+		expect(args[11]).toBe("tmux");
 	});
 
 	it("preserves embedded single quotes verbatim — no shell quoting on the alerter path", () => {
@@ -100,13 +174,20 @@ describe("buildMacNotifierArgs (alerter)", () => {
 			{
 				title: "x",
 				body: "y",
-				onClick: { session: "it's", window: "w", pane: "%1", windowName: "", paneTitle: "" },
+				onClick: {
+					session: "it's",
+					window: "w",
+					pane: "%1",
+					windowName: "",
+					paneTitle: "",
+					terminalApp: "Ghostty",
+				},
 			},
 			SCRIPT,
 			WRAPPER,
 		);
 		// Bun.spawn argv passes raw bytes; no `'\''` close-escape-reopen needed.
-		expect(args[7]).toBe("it's");
+		expect(args[8]).toBe("it's");
 	});
 });
 
@@ -118,7 +199,7 @@ describe("mac-alerter.sh wrapper script shape", () => {
 	//
 	//   1. NO `--actions` on the base ARGS. With `--actions`, alerter forces
 	//      Alert-style (persistent on screen, has to be clicked away). OMP's
-	//      desired UX is Banner-style: auto-dismiss after ~10 s and let macOS
+	//      desired UX is Banner-style: auto-dismiss after ~5 s and let macOS
 	//      archive the entry to Notification Center.
 	//   2. NO non-zero `--timeout`. alerter calls `removeDeliveredNotification`
 	//      when the timeout expires, which purges the NC entry too.
@@ -136,10 +217,52 @@ describe("mac-alerter.sh wrapper script shape", () => {
 	});
 
 	it("still routes @CONTENTCLICKED through the click handler", () => {
-		// Banner mode loses the dedicated `--actions` button, but body clicks
-		// still produce `@CONTENTCLICKED` on stdout. The click-jump must still
-		// work when the user clicks the toast itself.
 		expect(source).toContain("@CONTENTCLICKED");
+	});
+
+	it("invokes the click handler with terminal_app first, then session/window/pane/multiplexer", () => {
+		expect(source).toMatch(/"\$CLICK_SCRIPT"\s+"\$TERMINAL_APP"\s+"\$SESSION"\s+"\$WIN"\s+"\$PANE"\s+"\$MULTIPLEXER"/);
+	});
+});
+
+describe("notify-click.sh script shape", () => {
+	// The Ghostty tab-selection AppleScript MUST run for both tmux and zellij
+	// branches because each Ghostty tab hosts a separate multiplexer session.
+	// A previous revision gated this step on `MULTIPLEXER != "zellij"`, which
+	// broke Cmd+1/Cmd+2-style outer-tab switching for zellij users.
+	const clickPath = path.resolve(import.meta.dir, "..", "scripts", "notify-click.sh");
+	const source = readFileSync(clickPath, "utf8");
+
+	it("runs the Ghostty AppleScript tab selector regardless of multiplexer", () => {
+		// The guard line must NOT exclude zellij. We check the specific
+		// expression that previously caused the regression.
+		expect(source).not.toMatch(/MULTIPLEXER[^=]*!=\s*"zellij".*TERMINAL_APP[^=]*=\s*"Ghostty"/);
+		// And the AppleScript block is still present.
+		expect(source).toMatch(/tell application "Ghostty"/);
+	});
+
+	it("dispatches the zellij branch with --session targeting", () => {
+		// Each pane/tab focus call must thread `--session "$SESSION"` so the
+		// click handler reaches the correct background zellij instance.
+		expect(source).toMatch(/\$ZELLIJ_BIN" --session "\$SESSION" action go-to-tab-by-id "\$WIN"/);
+		expect(source).toMatch(/\$ZELLIJ_BIN" --session "\$SESSION" action focus-pane-id "\$PANE"/);
+	});
+
+	it("defaults to a single bright zellij flash", () => {
+		// The previous gray (#303446) was nearly invisible on catppuccin-mocha
+		// and a double-flash felt too noisy. Default is one yellow (#f9e2af)
+		// flash, overridable via OMP_* env vars (e.g. OMP_PANE_BLINK_COUNT=2).
+		expect(source).toMatch(/OMP_PANE_BLINK_COUNT:-1/);
+		expect(source).toMatch(/OMP_ZELLIJ_PANE_BLINK_BG:-#f9e2af/);
+		expect(source).toMatch(/OMP_PANE_BLINK_ON_SECONDS:-0\.35/);
+		expect(source).toMatch(/OMP_PANE_BLINK_OFF_SECONDS:-0\.18/);
+	});
+
+	it("preserves legacy single-hold behavior when OMP_PANE_BLINK_HOLD_SECONDS is set", () => {
+		// Anyone with a prior config that used the old single-hold variable
+		// should keep getting one flash, not two.
+		expect(source).toMatch(/OMP_PANE_BLINK_HOLD_SECONDS:-/);
+		expect(source).toMatch(/BLINK_COUNT=1/);
 	});
 });
 
@@ -157,28 +280,51 @@ describe("buildMacNotifierArgs (terminal-notifier)", () => {
 		]);
 	});
 
-	it("emits subtitle, group, and a shell-quoted -execute string when set", () => {
+	it("emits subtitle, group, and a shell-quoted -execute string when set (terminal_app slot included)", () => {
 		const args = buildMacNotifierArgs(
 			"/usr/local/bin/terminal-notifier",
 			{
 				title: "Task complete",
-				subtitle: "my-session",
+				subtitle: "main:2.1 · oh-my-pi",
 				body: "All done",
 				group: "omp-stop-abc",
-				onClick: { session: "my session", window: "my session:0", pane: "%5", windowName: "", paneTitle: "" },
+				onClick: {
+					session: "my session",
+					window: "my session:0",
+					pane: "%5",
+					windowName: "",
+					paneTitle: "",
+					terminalApp: "Ghostty",
+				},
 			},
 			SCRIPT,
 		);
 		const executeIdx = args.indexOf("-execute");
 		expect(executeIdx).toBeGreaterThan(-1);
 		// terminal-notifier hands the value to /bin/sh -c, so each component
-		// must be shell-quoted.
-		expect(args[executeIdx + 1]).toBe(`'${SCRIPT}' 'my session' 'my session:0' '%5'`);
+		// must be shell-quoted. Order matches the notify-click.sh signature:
+		//   scriptPath terminal_app session window pane multiplexer
+		expect(args[executeIdx + 1]).toBe(`'${SCRIPT}' 'Ghostty' 'my session' 'my session:0' '%5' 'tmux'`);
 	});
 
 	it("omits -execute entirely when onClick is absent", () => {
 		const args = buildMacNotifierArgs("/usr/local/bin/terminal-notifier", { title: "Done", body: "Hello" }, SCRIPT);
 		expect(args).not.toContain("-execute");
+	});
+});
+
+describe("buildClickCommand", () => {
+	it("emits empty-string terminal_app slot when terminalApp is undefined (skips osascript activate)", () => {
+		// Click handler treats empty terminal_app as \"don't run osascript\";
+		// the tmux pane jump still runs.
+		const cmd = buildClickCommand(SCRIPT, {
+			session: "s",
+			window: "s:0",
+			pane: "%1",
+			windowName: "",
+			paneTitle: "",
+		});
+		expect(cmd).toBe(`'${SCRIPT}' '' 's' 's:0' '%1' 'tmux'`);
 	});
 });
 
@@ -214,7 +360,7 @@ describe("sendMacNotification — no-notifier behavior", () => {
 
 		sendMacNotification({ title: "Task complete", body: "first" });
 		sendMacNotification({ title: "Awaiting input", body: "second" });
-		sendMacNotification({ title: "Plan ready", body: "third" });
+		sendMacNotification({ title: "Awaiting input", body: "third" });
 
 		// Three dispatch attempts, exactly one warn. Subsequent dispatches
 		// stay silent so the log doesn't drown in repeats.

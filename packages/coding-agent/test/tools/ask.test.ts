@@ -1,11 +1,11 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
 		cwd: "/tmp/test",
@@ -61,6 +61,17 @@ function stripAnsi(text: string): string {
 
 beforeAll(async () => {
 	await initTheme(false);
+});
+
+let sendNotificationSpy: ReturnType<typeof spyOn> | undefined;
+
+beforeEach(() => {
+	sendNotificationSpy = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+});
+
+afterEach(() => {
+	sendNotificationSpy?.mockRestore();
+	sendNotificationSpy = undefined;
 });
 
 describe("AskTool cancellation", () => {

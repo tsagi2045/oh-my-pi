@@ -1233,7 +1233,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		this.#renderPlanPreview(planContent, { append: true });
-		const choice = await this.showHookSelector(
+		// showHookSelector synchronously mounts the selector into the UI
+		// and immediately requestRender()s it; the returned Promise only
+		// resolves once the user picks an option. By NOT awaiting yet we
+		// can fire the `Plan ready` desktop notification at the moment the
+		// selector is on screen — so clicking the toast lands the user on
+		// a UI that is fully ready, not on a half-rendered pane.
+		const choicePromise = this.showHookSelector(
 			"Plan mode - next step",
 			[
 				"Approve and execute",
@@ -1247,6 +1253,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
 			},
 		);
+		this.#eventController.sendPlanReadyNotification(details);
+		const choice = await choicePromise;
 
 		if (
 			choice === "Approve and execute" ||

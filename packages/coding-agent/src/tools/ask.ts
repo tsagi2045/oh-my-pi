@@ -20,7 +20,7 @@ import {
 	type Component,
 	Container,
 	composeNotificationSubtitle,
-	getTmuxContext,
+	getNotificationFocusContext,
 	Markdown,
 	renderInlineMarkdown,
 	TERMINAL,
@@ -382,15 +382,17 @@ type AskParams = AskToolInput;
 /**
  * Build a notification-body excerpt from an `ask` tool invocation. The first
  * question (which is also what the dialog shows first) is collapsed to a
- * single line and clipped to ~60 characters. Returns `undefined` when there
- * is no question text so callers can substitute a fallback.
+ * single line and clipped to 200 characters — matching `excerptAssistantMessage`
+ * (event-controller) so the user's "글자 그대로" preference is honored within
+ * the macOS toast width budget. Returns `undefined` when there is no question
+ * text so callers can substitute a fallback.
  */
 export function excerptAskPrompt(params: AskParams): string | undefined {
 	const first = params.questions[0]?.question;
 	if (!first) return undefined;
 	const collapsed = first.replaceAll(/\s+/gu, " ").trim();
 	if (!collapsed) return undefined;
-	const limit = 60;
+	const limit = 200;
 	return collapsed.length > limit ? `${collapsed.slice(0, limit - 1).trimEnd()}…` : collapsed;
 }
 
@@ -421,25 +423,28 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	 * Send a desktop notification when the ask tool is waiting for input.
 	 *
 	 * The body excerpts the first question's text (collapsed to a single line,
-	 * 60-char clipped) so the user sees what they're being asked without
-	 * needing to switch back to the terminal first. Clicking the notification
-	 * jumps the kitty tab + tmux pane back to OMP via the bundled
-	 * `notify-click.sh` helper.
+	 * 200-char clipped) so the user sees what they're being asked without
+	 * needing to switch back to the terminal first. When the user has set
+	 * `notify.delivery=alerter`, clicking the toast runs `notify-click.sh`,
+	 * which activates the outer terminal app, jumps the tmux pane, and flashes
+	 * its background once.
 	 */
 	#sendAskNotification(params: AskParams): void {
 		const method = this.session.settings.get("ask.notify");
 		if (method === "off") return;
-		const tmux = getTmuxContext();
+		const focus = getNotificationFocusContext();
 		const sessionName = this.session.getSessionName?.();
-		const subtitle = composeNotificationSubtitle(tmux, sessionName);
+		const subtitle = composeNotificationSubtitle(focus, sessionName);
 		const body = excerptAskPrompt(params) ?? "Waiting for user input";
 		const sessionId = this.session.getSessionId?.() ?? "default";
+		const macAppName = TERMINAL.macAppName;
+		const onClick = focus && macAppName ? { ...focus, terminalApp: macAppName } : focus;
 		TERMINAL.sendNotification({
 			title: "Awaiting input",
 			subtitle,
 			body,
 			group: `omp-ask-${sessionId}`,
-			onClick: tmux,
+			onClick,
 		});
 	}
 

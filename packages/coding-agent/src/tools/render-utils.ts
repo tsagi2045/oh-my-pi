@@ -566,11 +566,17 @@ export function truncateDiffByHunk(
 // =============================================================================
 
 export function shortenPath(filePath: string, homeDir?: string): string {
+	// Normalize to NFC: macOS APFS returns paths in NFD (decomposed Hangul jamo)
+	// which renders as garbled CJK/katakana-like glyphs. This function is
+	// display-only so NFC normalization is always safe here.
+	// standardizeMacOSPath (dirs.ts) already normalizes cwd; this covers tool
+	// argument paths sourced from filesystem ops or Claude's tool calls.
+	const nfc = filePath.normalize("NFC");
 	const home = homeDir ?? os.homedir();
-	if (home && filePath.startsWith(home)) {
-		return `~${filePath.slice(home.length)}`;
+	if (home && nfc.startsWith(home)) {
+		return `~${nfc.slice(home.length)}`;
 	}
-	return filePath;
+	return nfc;
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

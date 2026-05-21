@@ -1,14 +1,27 @@
 /**
- * The desktop completion notification has two faces:
- *   - Default: `Task complete` with the last assistant text as the body.
- *   - After exit_plan_mode: `Plan ready` with the plan title as the body.
+ * The desktop completion notification responsibility is split between two
+ * methods on EventController:
  *
- * The "after exit_plan_mode" signal is captured per-turn inside
- * EventController, then read once at sendCompletionNotification time and
- * cleared. The next turn must start without that flag set. Three tests:
- *   1. plan-ready dispatch fires with the right title/body/group
- *   2. a regular completion (no exit_plan_mode) still says "Task complete"
- *   3. agent_start resets the per-turn flag so it can't leak across turns
+ *   sendCompletionNotification()
+ *     - Called on every agent_end.
+ *     - Plan mode active → return silently (no Task complete during
+ *       intermediate plan-mode turns).
+ *     - One-shot suppression flag → return silently and clear (consumes a
+ *       same-turn follow-up agent_end emitted by the plan-mode abort).
+ *     - Otherwise → emit `Task complete` with the last assistant excerpt
+ *       and group `omp-stop-<sessionId>`.
+ *
+ *   sendPlanReadyNotification(details)
+ *     - Called by InteractiveMode.handleExitPlanModeTool() AFTER the plan
+ *       preview is rendered and the approval selector is on screen, so a
+ *       user who clicks the toast lands on a UI ready to act on.
+ *     - Emits `Plan ready` with `details.title` as the body and group
+ *       `omp-plan-<sessionId>`.
+ *     - Arms the one-shot suppression flag so the agent_end emitted by the
+ *       plan-mode abort does NOT produce a second toast in the same turn.
+ *
+ * `agent_start` clears the one-shot suppression flag so the next real turn
+ * notifies normally.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -16,6 +29,7 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { _resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { ExitPlanModeDetails } from "@oh-my-pi/pi-coding-agent/tools";
 
 function createAssistantMessage(text = "All tests passed."): AssistantMessage {
 	return {
@@ -53,6 +67,7 @@ function createContext(overrides: Partial<InteractiveModeContext> = {}): Interac
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
 		editor: { getText: () => "" },
+		planModeEnabled: false,
 		sessionManager: {
 			getSessionName: () => "session-x",
 			getSessionId: () => "sid-123",
@@ -67,6 +82,15 @@ function createContext(overrides: Partial<InteractiveModeContext> = {}): Interac
 		ensureLoadingAnimation: vi.fn(),
 		...overrides,
 	} as unknown as InteractiveModeContext;
+}
+
+function planDetails(title: string): ExitPlanModeDetails {
+	return {
+		planFilePath: "/tmp/plan.md",
+		planExists: true,
+		title,
+		finalPlanFilePath: `/tmp/${title}.md`,
+	};
 }
 
 describe("EventController plan-ready completion notification", () => {
@@ -86,30 +110,11 @@ describe("EventController plan-ready completion notification", () => {
 		_resetSettingsForTest();
 	});
 
-	it("renders a distinct 'Plan ready' toast after exit_plan_mode and consumes the flag", async () => {
-		const ctx = createContext();
+	it("sendPlanReadyNotification emits a single 'Plan ready' toast with the plan title as the body", () => {
+		const ctx = createContext({ planModeEnabled: true });
 		const controller = new EventController(ctx);
 
-		// Drive the exit_plan_mode tool branch — sets the per-turn flag and
-		// awaits the (stubbed) handleExitPlanModeTool, which would normally
-		// abort the session and fire agent_end.
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolName: "exit_plan_mode",
-			toolCallId: "call-1",
-			isError: false,
-			result: {
-				content: [],
-				details: {
-					planFilePath: "/tmp/plan.md",
-					planExists: false,
-					title: "WP_MIGRATION_PLAN",
-					finalPlanFilePath: "/tmp/WP_MIGRATION_PLAN.md",
-				},
-			},
-		} as never);
-
-		controller.sendCompletionNotification();
+		controller.sendPlanReadyNotification(planDetails("WP_MIGRATION_PLAN"));
 
 		expect(sendSpy).toHaveBeenCalledTimes(1);
 		const payload = sendSpy.mock.calls[0][0] as {
@@ -117,60 +122,104 @@ describe("EventController plan-ready completion notification", () => {
 			body: string;
 			group: string;
 		};
+		// Dedicated category — title alone tells the user what happened.
 		expect(payload.title).toBe("Plan ready");
+		// Body is the plan title verbatim so the user can disambiguate
+		// when multiple sessions stack in Notification Center.
 		expect(payload.body).toBe("WP_MIGRATION_PLAN");
-		// Distinct group key ensures the plan-ready entry doesn't get collapsed
-		// by a subsequent regular completion in Notification Center.
+		// Distinct group so plan-ready toasts collapse with each other but
+		// don't merge with regular `Task complete` toasts.
 		expect(payload.group).toBe("omp-plan-sid-123");
-
-		// Calling again must NOT re-emit "Plan ready" — the flag is one-shot,
-		// consumed by the first dispatch.
-		sendSpy.mockClear();
-		controller.sendCompletionNotification();
-		expect(sendSpy).toHaveBeenCalledTimes(1);
-		const second = sendSpy.mock.calls[0][0] as { title: string };
-		expect(second.title).toBe("Task complete");
 	});
 
-	it("renders the default 'Task complete' toast when no exit_plan_mode happened", () => {
-		const ctx = createContext();
+	it("sendCompletionNotification suppresses every toast while plan mode is active", () => {
+		// In plan mode the agent often finishes several intermediate turns
+		// (reads, planning text, plan-mode enforcement re-prompts) before
+		// finally calling exit_plan_mode. None of those agent_end events
+		// should produce a `Task complete` toast — the only allowed toast
+		// during plan mode comes from sendPlanReadyNotification at exit.
+		const ctx = createContext({ planModeEnabled: true });
+		const controller = new EventController(ctx);
+
+		controller.sendCompletionNotification();
+
+		expect(sendSpy).not.toHaveBeenCalled();
+	});
+
+	it("sendCompletionNotification no longer emits a plan-ready toast even with exit details on the controller", () => {
+		// Responsibility split: only sendPlanReadyNotification fires the
+		// `Plan ready` toast. The agent_end path must NEVER emit it,
+		// regardless of internal state, because agent_end fires before the
+		// approval UI is on screen.
+		const ctx = createContext({ planModeEnabled: true });
+		const controller = new EventController(ctx);
+
+		controller.sendCompletionNotification();
+
+		expect(sendSpy).not.toHaveBeenCalled();
+	});
+
+	it("sendPlanReadyNotification suppresses a same-turn follow-up sendCompletionNotification", () => {
+		const ctx = createContext({ planModeEnabled: true });
+		const controller = new EventController(ctx);
+
+		// Interactive-mode flow: selector goes on screen, plan-ready fires,
+		// then the abort emits agent_end which calls
+		// sendCompletionNotification. The follow-up must be silent.
+		controller.sendPlanReadyNotification(planDetails("WP_MIGRATION_PLAN"));
+		expect(sendSpy).toHaveBeenCalledTimes(1);
+
+		sendSpy.mockClear();
+		controller.sendCompletionNotification();
+		expect(sendSpy).not.toHaveBeenCalled();
+	});
+
+	it("renders the default 'Task complete' toast when plan mode is not active", () => {
+		const ctx = createContext({ planModeEnabled: false });
 		const controller = new EventController(ctx);
 
 		controller.sendCompletionNotification();
 
 		expect(sendSpy).toHaveBeenCalledTimes(1);
-		const payload = sendSpy.mock.calls[0][0] as { title: string; group: string };
+		const payload = sendSpy.mock.calls[0][0] as { title: string; body: string; group: string };
 		expect(payload.title).toBe("Task complete");
+		expect(payload.body).toBe("All tests passed.");
 		expect(payload.group).toBe("omp-stop-sid-123");
 	});
 
-	it("clears the plan-mode flag on agent_start so it cannot leak across turns", async () => {
-		const ctx = createContext();
+	it("clears the one-shot suppression flag on agent_start so the next turn notifies normally", async () => {
+		// Turn 1: plan-mode flow ends — plan-ready fires and arms the
+		// one-shot suppression so the follow-up agent_end stays silent.
+		const ctx = createContext({ planModeEnabled: true });
 		const controller = new EventController(ctx);
+		controller.sendPlanReadyNotification(planDetails("LEAKED_PLAN"));
+		sendSpy.mockClear();
 
-		// Turn 1: exit_plan_mode fires but we never call sendCompletionNotification.
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolName: "exit_plan_mode",
-			toolCallId: "call-1",
-			isError: false,
-			result: {
-				content: [],
-				details: {
-					planFilePath: "/tmp/plan.md",
-					planExists: false,
-					title: "LEAKED_PLAN",
-					finalPlanFilePath: "/tmp/LEAKED_PLAN.md",
-				},
-			},
-		} as never);
-
-		// Turn 2 begins: agent_start must clear the captured plan details.
+		// Turn 2 begins after the user approved the plan — plan mode is no
+		// longer active. agent_start must clear the one-shot flag so the
+		// first normal completion of the execution turn is not silently
+		// dropped.
+		(ctx as unknown as { planModeEnabled: boolean }).planModeEnabled = false;
 		await controller.handleEvent({ type: "agent_start" } as never);
 		controller.sendCompletionNotification();
 
 		expect(sendSpy).toHaveBeenCalledTimes(1);
-		const payload = sendSpy.mock.calls[0][0] as { title: string };
+		const payload = sendSpy.mock.calls[0][0] as { title: string; body: string };
 		expect(payload.title).toBe("Task complete");
+		expect(payload.body).toBe("All tests passed.");
+	});
+
+	it("sendPlanReadyNotification respects the completion.notify=off setting", async () => {
+		_resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: { "completion.notify": "off" },
+		});
+		const ctx = createContext({ planModeEnabled: true });
+		const controller = new EventController(ctx);
+
+		controller.sendPlanReadyNotification(planDetails("MUTED_PLAN"));
+
+		expect(sendSpy).not.toHaveBeenCalled();
 	});
 });

@@ -967,6 +967,23 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "interaction", label: "Ask Notification", description: "Notify when ask tool is waiting for input" },
 	},
 
+	"notify.delivery": {
+		type: "enum",
+		values: ["auto", "alerter", "osc"] as const,
+		default: "auto",
+		ui: {
+			tab: "interaction",
+			label: "Notification Delivery",
+			description:
+				"How desktop notifications are delivered on macOS. 'auto' uses the native OSC 9/99 path for ghostty/iTerm2/wezterm and the alerter shell-out elsewhere. 'alerter' forces alerter/terminal-notifier even on native terminals — needed for click-jump back to the tmux pane (toast icon becomes alerter's '>_'). 'osc' forces OSC 9 (debugging).",
+			options: [
+				{ value: "auto", label: "Auto", description: "OSC for native macOS terminals, alerter elsewhere" },
+				{ value: "alerter", label: "alerter (click-jump)", description: "Force alerter so clicking the toast jumps back to the originating tmux pane" },
+				{ value: "osc", label: "OSC 9 (debug)", description: "Force OSC escape sequences (no click callback)" },
+			],
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",

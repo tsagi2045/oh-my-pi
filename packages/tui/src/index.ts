@@ -27,6 +27,7 @@ export * from "./keys";
 // Desktop notification helpers
 export * from "./notify/desktop";
 export * from "./notify/tmux-context";
+export * from "./notify/zellij-context";
 export * from "./notify/types";
 // Mermaid diagram support
 // Input buffering for batch splitting

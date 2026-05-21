@@ -8,21 +8,28 @@ import { isCompiledBinary, logger, VERSION } from "@oh-my-pi/pi-utils";
 // real path before any `Bun.spawn()` exec.
 import macAlerterWrapperAsset from "../../scripts/mac-alerter.sh" with { type: "file" };
 import notifyClickAsset from "../../scripts/notify-click.sh" with { type: "file" };
-import notifyFlashAsset from "../../scripts/notify-flash.sh" with { type: "file" };
 import { shellQuoteAll } from "./shell-quote";
-import type { NotificationOpts, TmuxFocusAction } from "./types";
+import type { NotificationFocusAction, NotificationOpts } from "./types";
 
 /**
  * Resolve the macOS notifier binary OMP should shell out to, cached once per
- * process. We prefer `alerter` (Vincent Saluzzo's fork of terminal-notifier
- * with action-button support) because it ships its own bundle id and is the
- * standard `terminal-notifier`-family tool people install via Homebrew. We
- * fall through to plain `terminal-notifier` for the same reason.
+ * process. **Preference order is `terminal-notifier` first, `alerter` second**:
  *
- * Both register their own LSApplication entry, so notifications attribute to
- * a "Terminal" / `>_` icon and survive when the active terminal emulator
- * (kitty, ghostty, alacritty, …) hasn't been granted notification permission
- * by the user.
+ * - `terminal-notifier` ships its own `.app` bundle
+ *   (`fr.julienxx.oss.terminal-notifier`) and registers a real
+ *   `LSApplication`. macOS Tahoe (26.x) attributes the notification to that
+ *   bundle id reliably, surfaces it under "terminal-notifier" in System
+ *   Settings → Notifications, and honors per-app Banner-vs-Alert style +
+ *   auto-dismiss. This is the path we want by default.
+ * - `alerter` is a single Mach-O binary with no `.app` bundle and uses
+ *   `--sender com.apple.Terminal` to impersonate Terminal. On macOS Tahoe
+ *   the impersonation is ineffective and macOS falls back to attributing
+ *   the toast to the nearest GUI parent process — which for `omp` running
+ *   inside ghostty's tmux is **Ghostty itself**. The toast then renders
+ *   under Ghostty's notification settings (typically "Persistent" /
+ *   "Alert"), so it doesn't auto-dismiss and looks like a Ghostty alert.
+ *   We keep alerter as a fallback for users who only have it installed,
+ *   but warn them once so they `brew install terminal-notifier`.
  *
  * `null` means "neither tool is on $PATH"; the caller falls back to osascript.
  */
@@ -32,7 +39,7 @@ let macNotifierPath: string | null = null;
 export function findMacNotifier(): string | null {
 	if (macNotifierResolved) return macNotifierPath;
 	macNotifierResolved = true;
-	for (const candidate of ["alerter", "terminal-notifier"]) {
+	for (const candidate of ["terminal-notifier", "alerter"]) {
 		try {
 			const result = Bun.spawnSync(["which", candidate], {
 				stdout: "pipe",
@@ -104,18 +111,6 @@ function getNotifyClickScript(): string {
 }
 
 /**
- * Pane-flash script bundled with the TUI package. Fires at notification
- * dispatch time on the native-macOS OSC path (ghostty / iTerm2 / wezterm)
- * where OMP cannot observe the user's click — sets the originating tmux
- * pane border to gold and holds it for ~30 s so the user can spot the
- * pane when they walk back to the terminal. Receives the tmux pane id as
- * its only positional argument. Resolved lazily, cached per process.
- */
-export function getNotifyFlashScript(): string {
-	return resolveBundledScript(notifyFlashAsset, "notify-flash.sh");
-}
-
-/**
  * alerter wrapper — gives alerter terminal-notifier-style fire-and-forget
  * semantics by backgrounding the wait+route inside a detached subshell.
  * alerter has no `--execute` flag of its own; it returns the user's chosen
@@ -124,7 +119,6 @@ export function getNotifyFlashScript(): string {
 function getMacAlerterWrapper(): string {
 	return resolveBundledScript(macAlerterWrapperAsset, "mac-alerter.sh");
 }
-
 /**
  * `true` when this notifier path is `alerter` (or its basename matches).
  * Exported for tests.
@@ -146,6 +140,11 @@ export function isAlerter(notifier: string): boolean {
  *
  * **terminal-notifier** has built-in `-execute` (fire-and-forget) so we
  * invoke it directly with BSD-style short flags.
+ *
+ * The `terminalApp` field on `opts.onClick` (set by the fire site from
+ * `TERMINAL.macAppName`) flows through as a trailing positional so the
+ * click handler knows which macOS app to `tell ... to activate` — required
+ * for ghostty / iTerm2 / wezterm support.
  */
 export function buildMacNotifierArgs(
 	notifier: string,
@@ -156,7 +155,7 @@ export function buildMacNotifierArgs(
 	if (isAlerter(notifier)) {
 		// Wrapper signature:
 		//   mac-alerter.sh <alerter_bin> <title> <subtitle> <body> <group>
-		//                  <click_script> <session> <window> <pane>
+		//                  <click_script> <terminal_app> <session> <window> <pane> <multiplexer>
 		// All positional; empty strings are valid for absent fields.
 		return [
 			alerterWrapper,
@@ -166,9 +165,11 @@ export function buildMacNotifierArgs(
 			opts.body,
 			opts.group ?? "",
 			opts.onClick ? clickScript : "",
+			opts.onClick?.terminalApp ?? "",
 			opts.onClick?.session ?? "",
 			opts.onClick?.window ?? "",
 			opts.onClick?.pane ?? "",
+			opts.onClick?.kind ?? "tmux",
 		];
 	}
 
@@ -186,11 +187,18 @@ export function buildMacNotifierArgs(
  * Build the single shell-string passed to terminal-notifier's `-execute`.
  *
  * terminal-notifier hands the value to `/bin/sh -c`. The helper script takes
- * three positional args (session, window, pane); we shell-quote each so
- * session names with spaces, quotes, etc. survive intact.
+ * five positional args (terminal-app, session, window, pane, multiplexer);
+ * we shell-quote each so values with spaces, quotes, etc. survive intact.
  */
-export function buildClickCommand(scriptPath: string, action: TmuxFocusAction): string {
-	return shellQuoteAll([scriptPath, action.session, action.window, action.pane]);
+export function buildClickCommand(scriptPath: string, action: NotificationFocusAction): string {
+	return shellQuoteAll([
+		scriptPath,
+		action.terminalApp ?? "",
+		action.session,
+		action.window,
+		action.pane,
+		action.kind ?? "tmux",
+	]);
 }
 
 /**
@@ -210,6 +218,7 @@ export function buildClickCommand(scriptPath: string, action: TmuxFocusAction): 
  * dispatch so the user can spot it in `~/.omp/logs/omp.YYYY-MM-DD.log`.
  */
 let missingNotifierWarned = false;
+let alerterFallbackWarned = false;
 
 export function sendMacNotification(opts: NotificationOpts): void {
 	const notifier = findMacNotifier();
@@ -217,12 +226,28 @@ export function sendMacNotification(opts: NotificationOpts): void {
 		if (!missingNotifierWarned) {
 			missingNotifierWarned = true;
 			logger.warn(
-				"Desktop notification skipped: neither 'alerter' nor 'terminal-notifier' is on $PATH. " +
-					"Install with 'brew install alerter' to enable completion/ask/plan-ready toasts.",
+				"Desktop notification skipped: neither 'terminal-notifier' nor 'alerter' is on $PATH. " +
+					"Install with 'brew install terminal-notifier' to enable completion/ask toasts (preferred — " +
+					"attributes reliably on macOS Tahoe). 'brew install alerter' also works as a fallback.",
 				{ title: opts.title },
 			);
 		}
 		return;
+	}
+	// One-shot nudge when the user only has alerter installed: on macOS Tahoe
+	// the toast will attribute to Ghostty/Terminal instead of alerter itself,
+	// auto-dismiss won't honor banner mode, and the notification looks
+	// "wrong" from the user's perspective. terminal-notifier ships its own
+	// .app bundle and avoids the attribution fallback.
+	if (isAlerter(notifier) && !alerterFallbackWarned) {
+		alerterFallbackWarned = true;
+		logger.warn(
+			"Using 'alerter' for desktop notifications. On macOS Tahoe (26.x) alerter's --sender " +
+				"impersonation is ineffective, so the toast may attribute to your terminal app " +
+				"(e.g. Ghostty) and inherit its persistent-style notifications. Install " +
+				"'brew install terminal-notifier' for reliable attribution + banner auto-dismiss.",
+			{ notifier },
+		);
 	}
 	try {
 		const child = Bun.spawn(buildMacNotifierArgs(notifier, opts), {
@@ -254,4 +279,5 @@ export function resetMacNotifierCacheForTesting(): void {
 /** Reset the one-shot missing-notifier warning guard. Test-only. */
 export function resetMissingNotifierWarnedForTesting(): void {
 	missingNotifierWarned = false;
+	alerterFallbackWarned = false;
 }

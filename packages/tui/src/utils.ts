@@ -14,7 +14,9 @@ export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { getDefaultTabWidth, getIndentation } from "@oh-my-pi/pi-utils";
 
 export function sliceWithWidth(line: string, startCol: number, length: number, strict?: boolean | null): SliceResult {
-	return nativeSliceWithWidth(line, startCol, length, strict ?? null, getDefaultTabWidth());
+	// Compose Hangul jamo to NFC so the native slicer's width tracking matches
+	// what the terminal will render. See HANGUL_JAMO_REGEX for context.
+	return nativeSliceWithWidth(normalizeHangulJamo(line), startCol, length, strict ?? null, getDefaultTabWidth());
 }
 
 export function truncateToWidth(
@@ -28,11 +30,17 @@ export function truncateToWidth(
 	// and `maxWidth` is a required `u32` that throws on `null`/`undefined`
 	// everywhere. Pass concrete defaults that mirror the Rust `unwrap_or`s.
 	const safeWidth = Number.isFinite(maxWidth) ? Math.max(0, Math.trunc(maxWidth)) : 0;
-	return nativeTruncateToWidth(text, safeWidth, ellipsisKind ?? Ellipsis.Unicode, pad ?? false, getDefaultTabWidth());
+	return nativeTruncateToWidth(
+		normalizeHangulJamo(text),
+		safeWidth,
+		ellipsisKind ?? Ellipsis.Unicode,
+		pad ?? false,
+		getDefaultTabWidth(),
+	);
 }
 
 export function wrapTextWithAnsi(text: string, width: number): string[] {
-	return nativeWrapTextWithAnsi(text, width, getDefaultTabWidth());
+	return nativeWrapTextWithAnsi(normalizeHangulJamo(text), width, getDefaultTabWidth());
 }
 
 export function extractSegments(
@@ -81,6 +89,27 @@ export function getSegmenter(): Intl.Segmenter {
 	return segmenter;
 }
 
+/**
+ * Hangul Jamo / Compat Jamo / Half-width Jamo / Jamo Extended-A/B ranges.
+ *
+ * macOS APFS stores Korean filenames in NFD (decomposed conjoining jamo), and
+ * any path/text we display that originated from the filesystem can arrive in
+ * that form. `Bun.stringWidth` counts each jamo separately (2 cells for the
+ * Choseong, 1 for the Jungseong, etc.), but Ghostty/Zellij compose the jamo
+ * back into a single 2-cell syllable when rendering. The width mismatch
+ * desyncs OMP's cursor tracking from the terminal's, so subsequent text gets
+ * drawn at the wrong column and the line visually shatters.
+ *
+ * Whenever we touch text for measurement or output, normalize any Jamo run to
+ * NFC so width and rendered bytes both reflect what the terminal actually
+ * draws. Same rationale as the paste handler in `components/input.ts`.
+ */
+const HANGUL_JAMO_REGEX = /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uD7B0-\uD7FF]/u;
+
+function normalizeHangulJamo(str: string): string {
+	return HANGUL_JAMO_REGEX.test(str) ? str.normalize("NFC") : str;
+}
+
 export function visibleWidthRaw(str: string): number {
 	if (!str) {
 		return 0;
@@ -101,7 +130,9 @@ export function visibleWidthRaw(str: string): number {
 	if (isPureAscii) {
 		return str.length + tabLength;
 	}
-	return Bun.stringWidth(str) + tabLength;
+	// Compose Hangul jamo to single syllables so the cell count matches what
+	// the terminal will actually render (see HANGUL_JAMO_REGEX comment).
+	return Bun.stringWidth(normalizeHangulJamo(str)) + tabLength;
 }
 
 /**
@@ -117,13 +148,23 @@ const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
 
 /**
  * Normalize text for terminal output without changing logical editor content.
- * Some terminals render precomposed Thai/Lao AM vowels inconsistently during
- * differential repaint. Their compatibility decompositions have the same cell
- * width but avoid stale-cell artifacts in terminal renderers.
+ *
+ * Two passes:
+ *   1. Hangul jamo (U+1100..U+11FF and friends) are composed to NFC syllables
+ *      so the rendered byte sequence matches the width we computed via
+ *      `visibleWidthRaw`. Otherwise NFD strings drawn directly cause cursor
+ *      drift in OMP <-> multiplexer <-> terminal cell tracking.
+ *   2. Precomposed Thai/Lao AM vowels are split into their compatibility
+ *      decompositions; some terminals render them inconsistently during
+ *      differential repaint, and the decomposed form has the same width but
+ *      avoids stale-cell artifacts in terminal renderers.
  */
 export function normalizeTerminalOutput(str: string): string {
-	if (!THAI_LAO_AM_REGEX.test(str)) return str;
-	return str.replace(THAI_LAO_AM_GLOBAL_REGEX, char => (char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2"));
+	let result = normalizeHangulJamo(str);
+	if (THAI_LAO_AM_REGEX.test(result)) {
+		result = result.replace(THAI_LAO_AM_GLOBAL_REGEX, char => (char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2"));
+	}
+	return result;
 }
 
 const makeBoolArray = (chars: string): Uint8Array => {

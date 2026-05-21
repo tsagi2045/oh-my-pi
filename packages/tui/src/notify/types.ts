@@ -30,41 +30,55 @@ export interface NotificationOpts {
 	/**
 	 * Click action. When set and the platform supports callbacks (macOS with
 	 * alerter/terminal-notifier installed), clicking the toast jumps focus
-	 * back to the originating tmux pane and flashes its border. `null` (or
-	 * absent) disables the click callback — the notification is still shown.
+	 * back to the originating tmux/Zellij target and optionally highlights
+	 * it once. `null` (or absent) disables the click callback — the
+	 * notification is still shown.
 	 */
-	onClick?: TmuxFocusAction | null;
+	onClick?: NotificationFocusAction | null;
 }
 
+export type NotificationFocusKind = "tmux" | "zellij";
+
 /**
- * Tmux context captured at notification dispatch time via `getTmuxContext()`.
+ * Focus target captured at notification dispatch time.
+ *
  * Carries two flavors of fields:
  *
  * 1. **Click-jump identifiers** (`session`, `window`, `pane`) — internal IDs
- *    fed to `tmux select-window` / `tmux select-pane` and the kitty-tab
- *    title match. The user never sees these.
+ *    fed to tmux / Zellij commands on click. The user never sees these.
  * 2. **Display strings** (`windowName`, `paneTitle`) — the human-readable
- *    labels the user sees in their tmux status line. Fire sites use these
- *    to compose the notification subtitle so the toast tells the user
- *    *where* the alert came from — useful when several OMP instances live
- *    in different windows of the same tmux session.
+ *    labels the user sees in their multiplexer UI. Fire sites use these to
+ *    compose the notification subtitle so the toast tells the user *where*
+ *    the alert came from.
  *
- * Both flavors are populated in a single `tmux display-message` round-trip;
- * the display strings can be empty when tmux's `set -g pane-border-format`
- * (or equivalent) hasn't been customized.
+ * `kind` selects the click-jump backend:
+ *   - `"tmux"`   → `window` = `<session>:<window-index>`, `pane` = `%5`
+ *   - `"zellij"` → `window` = stable `tab_id`, `pane` = `ZELLIJ_PANE_ID`
+ *
+ * `kind` is optional for backward compatibility; absent is treated as
+ * `"tmux"` by the click handler.
  */
-export interface TmuxFocusAction {
-	/** tmux session display name, used to match the kitty tab title. */
+export interface NotificationFocusAction {
+	kind?: NotificationFocusKind;
 	session: string;
-	/** `<session>:<window-index>` form for `tmux select-window`. */
 	window: string;
-	/** Pane id (`%5`) for `tmux select-pane`. */
 	pane: string;
-	/** Human-readable tmux window name (`#{window_name}`). May be empty. */
 	windowName: string;
-	/** Human-readable tmux pane title (`#{pane_title}`). May be empty. */
 	paneTitle: string;
+	/**
+	 * macOS application name of the outer terminal hosting this multiplexer
+	 * client (e.g. `"Ghostty"`, `"iTerm"`). Set by the fire site from
+	 * `TERMINAL.macAppName` just before dispatch; consumed by the click
+	 * handler to drive `osascript -e 'tell application "<app>" to activate'`.
+	 *
+	 * Empty/undefined → click handler skips the `activate` step (the user's
+	 * window stays where it is and the pane/tab jump still runs).
+	 */
+	terminalApp?: string;
 }
+
+// Backward-compatible alias for existing imports/tests.
+export type TmuxFocusAction = NotificationFocusAction;
 
 /**
  * Minimal contract for the OSC 9 / OSC 99 / Bell fallback path.
@@ -84,11 +98,28 @@ export interface LegacyNotifier {
 	 * description; kitty and alacritty do not (their OSC handlers exist but
 	 * the app isn't a notification-capable bundle on macOS).
 	 *
-	 * When true on darwin, `sendDesktopNotification` emits the OSC sequence
-	 * directly so the terminal's own bundle owns the notification — meaning
-	 * macOS notification-style settings, Notification Center, and click-to-
-	 * focus all flow through that terminal app instead of through the
-	 * `alerter` / `terminal-notifier` shell-out fallback.
+	 * When true on darwin AND `deliveryOverride` is not set,
+	 * `sendDesktopNotification` emits the OSC sequence directly so the
+	 * terminal's own bundle owns the notification — meaning macOS
+	 * notification-style settings, Notification Center, and click-to-focus
+	 * all flow through that terminal app instead of through the `alerter` /
+	 * `terminal-notifier` shell-out fallback.
 	 */
 	readonly nativeMacosNotifications: boolean;
+	/**
+	 * Force a specific delivery mechanism on darwin, regardless of
+	 * `nativeMacosNotifications`. Wired from the user's `notify.delivery`
+	 * setting at boot.
+	 *
+	 *   - `"alerter"` — always shell out to `alerter` / `terminal-notifier`.
+	 *     Click callback works (jumps tmux pane, flashes pane background).
+	 *     Toast icon is the notifier's, not the terminal app's.
+	 *   - `"osc"` — always emit OSC 9 / OSC 99 / Bell. Native terminal owns
+	 *     the toast; OMP cannot observe clicks.
+	 *   - `undefined` (default `"auto"`) — keep the native-vs-shell-out
+	 *     decision driven by `nativeMacosNotifications`.
+	 *
+	 * Non-darwin platforms ignore this field entirely — they always emit OSC.
+	 */
+	deliveryOverride?: "alerter" | "osc";
 }

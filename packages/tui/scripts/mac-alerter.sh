@@ -10,11 +10,18 @@
 #
 # Usage:
 #   mac-alerter.sh <alerter_bin> <title> <subtitle> <body> <group> \
-#                  <click_script> <session> <window> <pane>
+#                  <click_script> <terminal_app> <session> <window> <pane> <multiplexer>
 #
-# Empty strings ("") are valid for any of subtitle/group/click_script/session/
-# window/pane — they're skipped. When click_script is empty, no click handler
-# is wired (notification fires without an action button).
+# Empty strings ("") are valid for any of subtitle/group/click_script/
+# terminal_app/session/window/pane/multiplexer — they're skipped. When
+# click_script is empty, no click handler is wired (notification fires
+# without an action button).
+#
+#   <terminal_app> is the macOS app name of the outer terminal (e.g.
+#   "Ghostty"). Forwarded verbatim to the click handler so it can run
+#   `osascript -e 'tell application "<app>" to activate'` on click — this
+#   is what brings the user back to the terminal window before tmux
+#   pane jump + background flash.
 
 ALERTER="$1"
 TITLE="$2"
@@ -22,9 +29,11 @@ SUBTITLE="$3"
 BODY="$4"
 GROUP="$5"
 CLICK_SCRIPT="$6"
-SESSION="$7"
-WIN="$8"
-PANE="$9"
+TERMINAL_APP="$7"
+SESSION="$8"
+WIN="$9"
+PANE="${10}"
+MULTIPLEXER="${11}"
 
 # Build alerter argv. The shape here decides the on-screen presentation:
 #
@@ -35,7 +44,7 @@ PANE="$9"
 #                         iff "Show in Notification Center" is enabled for
 #                         this app under System Settings → Notifications.
 #
-# OMP defaults to Banner: the user asked for "auto-dismiss after ~10 s and
+# OMP defaults to Banner: the user asked for "auto-dismiss after ~5 s and
 # accumulate in NC". `--timeout` is left at the alerter default (0) so
 # alerter never calls `removeDeliveredNotification` — that call would also
 # purge the NC entry, defeating the point. Body clicks are still captured
@@ -45,10 +54,9 @@ ARGS=(--title "$TITLE" --message "$BODY" --sound default)
 [ -n "$GROUP" ] && ARGS+=(--group "$GROUP")
 
 (
-	# `--actions Open` makes alerter wait for input. Capture the chosen
-	# action; alerter's output convention is:
-	#   - the literal action label (here, "Open") when the action button is
-	#     clicked, OR "@ACTIONCLICKED" in some builds/configurations,
+	# alerter's output convention is:
+	#   - the literal action label when --actions is set, OR
+	#     "@ACTIONCLICKED" in some builds/configurations,
 	#   - "@CONTENTCLICKED" when the user clicks the notification body,
 	#   - "@CLOSED" / "@TIMEOUT" when the user dismisses or it times out.
 	# Treat the first three as "user wants to jump back".
@@ -56,7 +64,7 @@ ARGS=(--title "$TITLE" --message "$BODY" --sound default)
 	if [ -n "$CLICK_SCRIPT" ] && [ -x "$CLICK_SCRIPT" ] && {
 		[ "$RESULT" = "Open" ] || [ "$RESULT" = "@ACTIONCLICKED" ] || [ "$RESULT" = "@CONTENTCLICKED" ]
 	}; then
-		"$CLICK_SCRIPT" "$SESSION" "$WIN" "$PANE"
+		"$CLICK_SCRIPT" "$TERMINAL_APP" "$SESSION" "$WIN" "$PANE" "$MULTIPLEXER"
 	fi
 ) </dev/null >/dev/null 2>&1 &
 # `disown` detaches the subshell from the parent's job table so the OMP

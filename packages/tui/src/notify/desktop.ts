@@ -1,25 +1,34 @@
-import { $env, logger } from "@oh-my-pi/pi-utils";
-import { getNotifyFlashScript, sendMacNotification } from "./mac";
-import type { LegacyNotifier, NotificationOpts, TmuxFocusAction } from "./types";
+import { $env } from "@oh-my-pi/pi-utils";
+import { sendMacNotification } from "./mac";
+import type { LegacyNotifier, NotificationOpts } from "./types";
 
 /**
  * Public entry point for desktop notifications.
  *
  * Dispatch priority (in order):
  *
- * 1. **Native-on-darwin terminals (`nativeMacosNotifications = true`)** —
- *    ghostty, iTerm2, wezterm. These register their own `LSApplication` on
- *    macOS and surface OSC 9 / OSC 99 directly through
- *    `UNUserNotificationCenter`. Emit the OSC sequence and let the terminal
- *    own everything (notification style, NC archival, click-to-focus).
- * 2. **Other darwin terminals (kitty, alacritty, vscode, plain shells)** —
+ * 1. **`legacy.deliveryOverride`** — user-controlled override from
+ *    `notify.delivery`. Wins over all auto-detected paths on darwin.
+ *      - `"alerter"` on darwin → `sendMacNotification` regardless of the
+ *        terminal's native-notification capability.
+ *      - `"osc"` on darwin → emit OSC 9 / OSC 99 / Bell regardless of the
+ *        terminal app bundle.
+ *    On non-darwin platforms the override is moot — they always emit OSC.
+ * 2. **`opts.onClick` present on darwin** — the caller captured a click-jump
+ *    target (tmux or Zellij), so we MUST use the shell notifier path even
+ *    on native terminals like Ghostty. The native OSC path cannot carry
+ *    click callbacks.
+ * 3. **Native-on-darwin terminals (`nativeMacosNotifications = true`)** —
+ *    ghostty, iTerm2, wezterm. Emit the OSC sequence and let the terminal
+ *    app own everything when no click callback is needed.
+ * 4. **Other darwin terminals (kitty, alacritty, vscode, plain shells)** —
  *    no notification-capable bundle, so shell out to `alerter` /
  *    `terminal-notifier` via `notify/mac.ts`.
- * 3. **Linux / Windows** — write the OSC 9 / OSC 99 / Bell escape sequence
+ * 5. **Linux / Windows** — write the OSC 9 / OSC 99 / Bell escape sequence
  *    to stdout using the `LegacyNotifier`'s protocol-specific formatter.
  *
  * Each path carries title + subtitle + body. The OSC path collapses them to
- * a single string via `formatLegacyMessage`; the alerter path forwards the
+ * a single string via `formatLegacyMessage`; the notifier path forwards the
  * structured `NotificationOpts` so it can render discrete fields.
  *
  * Honors `PI_NOTIFICATIONS=off|0|false` as a global suppression switch.
@@ -27,51 +36,26 @@ import type { LegacyNotifier, NotificationOpts, TmuxFocusAction } from "./types"
 export function sendDesktopNotification(legacy: LegacyNotifier, opts: NotificationOpts): void {
 	if (isNotificationSuppressed()) return;
 	if (process.platform === "darwin") {
+		if (legacy.deliveryOverride === "alerter") {
+			sendMacNotification(opts);
+			return;
+		}
+		if (legacy.deliveryOverride === "osc") {
+			process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
+			return;
+		}
+		if (opts.onClick) {
+			sendMacNotification(opts);
+			return;
+		}
 		if (legacy.nativeMacosNotifications) {
 			process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
-			// On the native-OSC path the terminal app owns the click; OMP
-			// never sees it. Flash the pane at dispatch time instead — see
-			// `flashOriginatingPane` below.
-			if (opts.onClick) flashOriginatingPane(opts.onClick);
 			return;
 		}
 		sendMacNotification(opts);
 		return;
 	}
 	process.stdout.write(legacy.formatNotification(formatLegacyMessage(opts)));
-}
-
-/**
- * Light up the originating tmux pane border at notification dispatch time.
- *
- * Used on the native-darwin OSC path (ghostty / iTerm2 / wezterm) where the
- * notification's click is consumed by the terminal app itself — OMP never
- * gets a callback, so it can't run `notify-click.sh` at click time the way
- * the alerter path does. The next-best signal is to flash the pane border
- * AT DISPATCH and hold it long enough that the user can still spot the
- * pane when they return to the terminal a few seconds later.
- *
- * Fire-and-forget: the helper script backgrounds its own work and returns
- * immediately, but we also `unref()` the child so the OMP process doesn't
- * wait on it during shutdown.
- */
-export function flashOriginatingPane(onClick: TmuxFocusAction): void {
-	try {
-		const script = getNotifyFlashScript();
-		const child = Bun.spawn([script, onClick.pane], {
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		child.unref?.();
-	} catch (err) {
-		// Flash is a visual nicety — never block dispatch on it. Log once at
-		// debug level so a misconfigured tmux/PATH surfaces somewhere
-		// inspectable, but don't surface anything to the user.
-		logger.debug("Notification pane flash failed", {
-			err: err instanceof Error ? err.message : String(err),
-		});
-	}
 }
 
 export function isNotificationSuppressed(): boolean {

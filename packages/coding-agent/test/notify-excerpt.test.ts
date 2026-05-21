@@ -2,7 +2,11 @@
  * Excerpt helpers feed user-visible notification body text. They have two
  * jobs:
  *   1. Pull the right field out of the right structure.
- *   2. Collapse whitespace + truncate so the toast is one readable line.
+ *   2. Collapse whitespace + truncate so the toast is one readable block.
+ *
+ * Post-redesign both helpers use a 200-char limit (matches macOS's own
+ * effective body wrap) so the user gets "내용 그대로" within the toast
+ * width budget, instead of the previous aggressive 80/60-char clips.
  *
  * If either side breaks the user gets a confusing or empty notification, so
  * we lock the contract here. Nothing else asserts on these helpers.
@@ -57,18 +61,29 @@ describe("excerptAssistantMessage", () => {
 		expect(excerptAssistantMessage(msg)).toBe("hello world");
 	});
 
-	it("clips to 79 characters + ellipsis when content exceeds 80", () => {
-		const long = "x".repeat(200);
+	it("clips to 199 characters + ellipsis when content exceeds 200", () => {
+		// 200-char cap (post-redesign): both alerter and macOS NC wrap longer
+		// bodies onto multiple lines gracefully, but past ~200 macOS itself
+		// starts truncating. Matching that ceiling avoids double-truncation
+		// while keeping toasts a sensible visual size.
+		const long = "x".repeat(400);
 		const result = excerptAssistantMessage(assistant([{ type: "text", text: long }]));
-		// 79 chars of content + 1 char ellipsis = 80 total.
-		expect(result).toHaveLength(80);
+		// 199 chars of content + 1 char ellipsis = 200 total.
+		expect(result).toHaveLength(200);
 		expect(result?.endsWith("…")).toBe(true);
-		expect(result?.startsWith("x".repeat(79))).toBe(true);
+		expect(result?.startsWith("x".repeat(199))).toBe(true);
 	});
 
-	it("does not append ellipsis when content fits exactly in 80 characters", () => {
-		const exact = "y".repeat(80);
+	it("does not append ellipsis when content fits exactly in 200 characters", () => {
+		const exact = "y".repeat(200);
 		expect(excerptAssistantMessage(assistant([{ type: "text", text: exact }]))).toBe(exact);
+	});
+
+	it("preserves a 199-char body verbatim (just under the truncation threshold)", () => {
+		// Boundary check the other direction — make sure the off-by-one logic
+		// in `slice(0, limit - 1)` doesn't kick in for ≤200 inputs.
+		const short = "z".repeat(199);
+		expect(excerptAssistantMessage(assistant([{ type: "text", text: short }]))).toBe(short);
 	});
 
 	it("picks the FIRST text block when multiple coexist with tool calls", () => {
@@ -113,12 +128,15 @@ describe("excerptAskPrompt", () => {
 		).toBe("do this or that?");
 	});
 
-	it("clips to 59 characters + ellipsis when the question exceeds 60", () => {
-		const long = "y".repeat(120);
+	it("clips to 199 characters + ellipsis when the question exceeds 200", () => {
+		// Same 200-char cap as `excerptAssistantMessage` — the two helpers
+		// share an implicit contract because they both feed the same macOS
+		// toast body slot.
+		const long = "y".repeat(400);
 		const result = excerptAskPrompt({
 			questions: [{ id: "q1", question: long, options: [{ label: "ok" }] }],
 		});
-		expect(result).toHaveLength(60);
+		expect(result).toHaveLength(200);
 		expect(result?.endsWith("…")).toBe(true);
 	});
 
